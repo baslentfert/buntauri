@@ -1,0 +1,8 @@
+{
+  "name": "buntauri-example-game",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "pixi.js": "8.22.0"
+  }
+}

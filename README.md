@@ -38,6 +38,8 @@ cd examples/dashboard && bun install
 bun build --compile --windows-hide-console app.ts assets/index.html --outfile SystemPulse.exe
 ```
 
+**[examples/game](examples/game)**: *Bun Catcher*, a PixiJS 8 arcade game (vector graphics, particles, screen shake, 60 fps WebGL). Catch burgers, dodge bombs; Bun keeps the high score on disk. Same build command, `--outfile BunCatcher.exe`.
+
 ## Try the window layer
 
 ```sh
