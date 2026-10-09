@@ -60,6 +60,33 @@ buntauri/
 - **macOS:** AppKit requires the main thread, so a host subprocess (same exe, like
   `Bun.WebView` does). Later.
 
+## How Bun builds its own releases (and what it means for buntauri)
+
+From Bun's source at UPSTREAM (`.buildkite/ci.ts`, `scripts/build/config.ts`,
+`scripts/build/macos-sdk.ts`, `scripts/build/ci-images/spec.ts`):
+
+- **Every target is built on one machine type**: Debian 13 on aarch64 (AWS r8g.4xlarge,
+  16 vCPU, 128 GB), and **cross-compiled** with clang `--target` plus a sysroot:
+  - Linux x64/arm64 (glibc): a sysroot of **Ubuntu 20.04 (glibc 2.31) + gcc-13 libstdc++**,
+    matching the WebKit prebuilt's environment (`LINUX_GLIBC_SYSROOT`, `/opt/linux-sysroot-glibc`).
+  - Linux musl: an Alpine sysroot. FreeBSD and Android: their own sysroot/NDK.
+  - macOS x64/arm64: the Apple SDK, downloaded from Apple's CDN by the vendored `xmac`
+    (`scripts/build/xmac.mjs`), linked with `ld64.lld`. No Mac involved.
+  - Windows x64: the MSVC CRT + Windows SDK via `xwin`, linked with `lld-link`.
+- Real Macs and Windows machines only **run tests** (and on Windows: sign) against those artifacts.
+- `scripts/build.ts` switches to a Buildkite **CI mode** when `CI` or `GITHUB_ACTIONS` is set
+  (buffered output for annotations, symbol order file); our workflows turn that off.
+
+What it means for buntauri:
+
+- **Linux**: wry needs **WebKitGTK 4.1**, which starts at **Ubuntu 22.04 / Debian 12**, so a
+  buntauri Linux build cannot share Bun's glibc 2.31 baseline. Plan: a separate Linux variant
+  with a 22.04+ baseline (native build, or a 22.04 sysroot that includes GTK/WebKitGTK).
+- **macOS and Windows could be built from Linux too**, like Bun does: the frameworks we link
+  (AppKit, WebKit, ...) are .tbd stubs in the Apple SDK, and macOS signing/notarizing works
+  from Linux with `rcodesign`. One Linux runner could then produce all platforms; the Mac and
+  Windows machines would only test. Not set up yet: needs the sysroots on the runner.
+
 ## Status
 
 - [x] `crates/window`: UI thread, windows, `app://` assets, invoke/resolve/reject, events,
