@@ -5,6 +5,7 @@
 //!
 //! Lives in the buntauri repo (bun-glue/) and is copied into the Bun tree.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -12,7 +13,8 @@ use bun_event_loop::ConcurrentTask::ConcurrentTask;
 use bun_event_loop::{ContextId, Task, TaskTag, Taskable, task_tag};
 use bun_jsc::bun_string_jsc::create_utf8_for_js;
 use bun_jsc::{CallFrame, JSGlobalObject, JSValue, JsResult, Strong};
-use buntauri_window::{AssetProvider, DirAssets, HostEvent, NoAssets, UiThread, WindowId};
+use bun_standalone_graph::{BASE_PUBLIC_PATH, Graph, is_bun_standalone_file_path};
+use buntauri_window::{Asset, AssetProvider, DirAssets, HostEvent, NoAssets, UiThread, WindowId, mime_for};
 
 struct State {
     ui: UiThread,
@@ -33,6 +35,59 @@ fn ui<'a>(global: &JSGlobalObject) -> JsResult<&'a UiThread> {
     match state() {
         Some(s) => Ok(&s.ui),
         None => Err(global.throw(format_args!("bun:buntauri is not initialized"))),
+    }
+}
+
+/// Serves `app://` straight from the executable (`bun build --compile`):
+/// `base` is a bunfs directory such as `B:/~BUN/root/assets`. Zero-copy: the
+/// graph is read-only and its bytes live in the executable's section.
+struct GraphAssets {
+    base: String,
+}
+
+impl AssetProvider for GraphAssets {
+    fn get(&self, path: &str) -> Option<Asset> {
+        if path.split(['/', '\\']).any(|seg| seg == ".." || seg.contains(':')) {
+            return None;
+        }
+        let graph = Graph::get_ref()?;
+        // The assets dir first, then the graph root: `--compile` puts the
+        // bundled chunks of an HTML entry (index-<hash>.js) at the root.
+        let file = graph
+            .find_ref(format!("{}/{}", self.base.trim_end_matches(['/', '\\']), path).as_bytes())
+            .or_else(|| graph.find_ref(format!("{BASE_PUBLIC_PATH}root/{path}").as_bytes()))?;
+        let mime = mime_for(path);
+        Some(Asset { bytes: rewrite_bunfs_urls(file.utf8_contents(), mime), mime: Cow::Borrowed(mime) })
+    }
+}
+
+/// `--compile` points bundled HTML at its chunks with the bunfs path
+/// (`src="B:/~BUN/root/index-x.js"`), which means nothing to a browser. In
+/// HTML/CSS/JS, turn that prefix into `/`, the root of `app://`. Untouched
+/// files stay zero-copy.
+fn rewrite_bunfs_urls(bytes: &'static [u8], mime: &str) -> Cow<'static, [u8]> {
+    const PREFIXES: [&str; 2] = ["B:/~BUN/root/", "/$bunfs/root/"];
+    let text = mime.starts_with("text/html") || mime.starts_with("text/css") || mime.starts_with("text/javascript");
+    let Ok(s) = std::str::from_utf8(bytes) else { return Cow::Borrowed(bytes) };
+    if !text || !PREFIXES.iter().any(|p| s.contains(p)) {
+        return Cow::Borrowed(bytes);
+    }
+    let mut out = s.to_string();
+    for p in PREFIXES {
+        out = out.replace(p, "/");
+    }
+    Cow::Owned(out.into_bytes())
+}
+
+/// `app://` source for `assetsDir`: inside the executable when it is a bunfs
+/// path of a compiled app, otherwise the directory on disk.
+fn asset_provider(dir: Option<String>) -> Arc<dyn AssetProvider> {
+    match dir {
+        Some(dir) if is_bun_standalone_file_path(dir.as_bytes()) && Graph::get_ref().is_some() => {
+            Arc::new(GraphAssets { base: dir.replace('\\', "/") })
+        }
+        Some(dir) => Arc::new(DirAssets(dir.into())),
+        None => Arc::new(NoAssets),
     }
 }
 
@@ -121,11 +176,8 @@ pub(crate) fn init(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSVal
         s.callback = Strong::create(callback, global);
         return Ok(JSValue::UNDEFINED);
     }
-    let provider: Arc<dyn AssetProvider> = if assets.is_string() {
-        Arc::new(DirAssets(string_arg(global, assets, "assetsDir")?.into()))
-    } else {
-        Arc::new(NoAssets)
-    };
+    let dir = if assets.is_string() { Some(string_arg(global, assets, "assetsDir")?) } else { None };
+    let provider = asset_provider(dir);
     let vm = global.bun_vm().handle();
     let ui = UiThread::spawn(move |ev| post(&vm, ev), provider)
         .map_err(|e| global.throw(format_args!("failed to start UI thread: {e}")))?;

@@ -64,7 +64,9 @@ buntauri/
       Test: `BUNTAURI_SELFTEST=1 bun-debug examples/bun/hello.ts`.
 - [ ] Release-build: 9 extra Windows-DLL's toestaan + delay-loaden (`binary-expectations.ts`, `flags.ts`).
 - [ ] Typefixes upstream bij Bun indienen (PR), dan verdwijnen ze uit `sync.ts`.
-- [ ] Fase 2: assets uit de `--compile`-graph, `@tauri-apps/api`-compat (`invoke`).
+- [x] Fase 2a: assets uit de `--compile`-exe (zero-copy uit de graph; bunfs-URL's in HTML/CSS/JS
+      herschreven naar `/`). Eén exe: `bun-debug build --compile examples/bun/hello.ts examples/bun/assets/index.html`.
+- [ ] Fase 2b: `@tauri-apps/api`-compat (`invoke`).
 - [ ] Fase 3: `buntauri build`, venster-icoon, tray (tray-icon), menu's (muda), manifest, signing
       (Azure Artifact Signing, instelbaar per app).
 - [ ] Fase 4: macOS (host-subproces), Linux.

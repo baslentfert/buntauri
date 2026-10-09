@@ -18,6 +18,14 @@ win.handle("greet", ({ name }) => `Hello ${name}`); // page: await __BUNTAURI__.
 win.on("closed", () => console.log("bye"));          // Bun exits when the last window closes
 ```
 
+One exe (frontend + Bun backend, nothing next to it):
+
+```sh
+bun build --compile app.ts assets/index.html --outfile MyApp.exe
+```
+
+`setAssetsDir(import.meta.dir + "/assets")` works both with `bun run` (disk) and inside the exe (served zero-copy from the executable).
+
 Building Bun with buntauri (Windows): `bun scripts/sync.ts ../bun` then `pwsh scripts/build-bun.ps1`.
 See [examples/bun](examples/bun) and [BUNTAURI.md](BUNTAURI.md).
 
