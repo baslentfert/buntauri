@@ -46,6 +46,11 @@ struct GraphAssets {
 }
 
 impl AssetProvider for GraphAssets {
+    fn host_spec(&self) -> Option<String> {
+        // The UI host (macOS) is the same executable: same graph, same base.
+        Some(self.base.clone())
+    }
+
     fn get(&self, path: &str) -> Option<Asset> {
         if path.split(['/', '\\']).any(|seg| seg == ".." || seg.contains(':')) {
             return None;
@@ -81,7 +86,7 @@ fn rewrite_bunfs_urls(bytes: &'static [u8], mime: &str) -> Cow<'static, [u8]> {
 
 /// `app://` source for `assetsDir`: inside the executable when it is a bunfs
 /// path of a compiled app, otherwise the directory on disk.
-fn asset_provider(dir: Option<String>) -> Arc<dyn AssetProvider> {
+pub(crate) fn asset_provider(dir: Option<String>) -> Arc<dyn AssetProvider> {
     match dir {
         Some(dir) if is_bun_standalone_file_path(dir.as_bytes()) && Graph::get_ref().is_some() => {
             Arc::new(GraphAssets { base: dir.replace('\\', "/") })
