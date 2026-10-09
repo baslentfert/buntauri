@@ -361,6 +361,8 @@ enum Command {
     Dialog(u64, Option<WindowId>, DialogSpec),
     Notify(u64, NotificationSpec),
     Shortcut(u64, bool, String),
+    /// Internal (UI side only): the page started (false) or finished (true) loading.
+    PageLoad(WindowId, bool),
     Shutdown,
 }
 
@@ -629,6 +631,10 @@ struct Entry {
     popup: Option<muda::Menu>,
     /// Close button emits `closerequested` instead of closing.
     prevent_close: bool,
+    /// The page is (re)loading: scripts sent now would be lost (WKWebView
+    /// drops them), so they wait in `queued` until it has finished.
+    loading: bool,
+    queued: Vec<Command>,
     // Field order matters: the webview drops before its window, and both
     // before the web context that holds the data directory.
     webview: WebView,
@@ -671,6 +677,7 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
     // macOS: AppKit requires the process main thread; there this runs in the
     // UI host process (host.rs), on its main thread.
     let mut event_loop = builder.build();
+    let proxy = event_loop.create_proxy();
     if ready.send(event_loop.create_proxy()).is_err() {
         return;
     }
@@ -749,7 +756,7 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
         };
         match event {
             Event::UserEvent(cmd) => match cmd {
-                Command::Create(id, opts) => match create(target, id, opts, &windows, &emit, &assets) {
+                Command::Create(id, opts) => match create(target, &proxy, id, opts, &windows, &emit, &assets) {
                     Ok(entry) => {
                         by_native.insert(entry.window.id(), id);
                         snap(id, &entry);
@@ -758,10 +765,18 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
                     }
                     Err(e) => emit(HostEvent::CreateFailed { window: id, message: e }),
                 },
-                Command::Eval(id, js) => {
-                    if let Some(e) = windows.get(&id) {
-                        if let Err(err) = e.webview.evaluate_script(&js) {
-                            emit(HostEvent::Error { window: Some(id), message: err.to_string() });
+                cmd @ (Command::Eval(..) | Command::EvalResult(..)) => match windows.get_mut(&script_window(&cmd)) {
+                    Some(e) if e.loading => e.queued.push(cmd),
+                    Some(e) => run_script(e, cmd, &emit),
+                    None => run_script_closed(cmd, &emit),
+                },
+                Command::PageLoad(id, finished) => {
+                    if let Some(e) = windows.get_mut(&id) {
+                        e.loading = !finished;
+                        if finished {
+                            for cmd in std::mem::take(&mut e.queued) {
+                                run_script(e, cmd, &emit);
+                            }
                         }
                     }
                 }
@@ -872,25 +887,6 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
                         emit(HostEvent::Reply { req, ok: false, value: e.to_string().into() });
                     }
                 }
-                Command::EvalResult(id, req, js) => {
-                    let Some(e) = windows.get(&id) else {
-                        emit(HostEvent::Reply { req, ok: false, value: "window is closed".into() });
-                        return;
-                    };
-                    let reply = emit.clone();
-                    // Wrapped so a thrown error comes back as a rejected reply.
-                    let script = format!(
-                        "(() => {{ try {{ return {{ ok: true, value: ({js}) }}; }} catch (e) {{ return {{ ok: false, value: String(e && e.message || e) }}; }} }})()"
-                    );
-                    let result = e.webview.evaluate_script_with_callback(&script, move |json| {
-                        let v: serde_json::Value = serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
-                        let ok = v["ok"].as_bool().unwrap_or(false);
-                        reply(HostEvent::Reply { req, ok, value: v["value"].clone() });
-                    });
-                    if let Err(err) = result {
-                        emit(HostEvent::Reply { req, ok: false, value: err.to_string().into() });
-                    }
-                }
                 Command::Monitors(req) => {
                     let primary = target.primary_monitor();
                     let list: Vec<serde_json::Value> = target
@@ -989,8 +985,51 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
     emit(HostEvent::Exited);
 }
 
+/// The window an `Eval`/`EvalResult` is for.
+fn script_window(cmd: &Command) -> WindowId {
+    match cmd {
+        Command::Eval(id, _) | Command::EvalResult(id, ..) => *id,
+        _ => unreachable!("not a script command"),
+    }
+}
+
+/// Run an `Eval`/`EvalResult` in a loaded page.
+fn run_script(e: &Entry, cmd: Command, emit: &Emit) {
+    match cmd {
+        Command::Eval(id, js) => {
+            if let Err(err) = e.webview.evaluate_script(&js) {
+                emit(HostEvent::Error { window: Some(id), message: err.to_string() });
+            }
+        }
+        Command::EvalResult(_, req, js) => {
+            let reply = emit.clone();
+            // Wrapped so a thrown error comes back as a rejected reply.
+            let script = format!(
+                "(() => {{ try {{ return {{ ok: true, value: ({js}) }}; }} catch (e) {{ return {{ ok: false, value: String(e && e.message || e) }}; }} }})()"
+            );
+            let result = e.webview.evaluate_script_with_callback(&script, move |json| {
+                let v: serde_json::Value = serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
+                let ok = v["ok"].as_bool().unwrap_or(false);
+                reply(HostEvent::Reply { req, ok, value: v["value"].clone() });
+            });
+            if let Err(err) = result {
+                emit(HostEvent::Reply { req, ok: false, value: err.to_string().into() });
+            }
+        }
+        _ => {}
+    }
+}
+
+/// An `EvalResult` for a window that is gone still gets its answer.
+fn run_script_closed(cmd: Command, emit: &Emit) {
+    if let Command::EvalResult(_, req, _) = cmd {
+        emit(HostEvent::Reply { req, ok: false, value: "window is closed".into() });
+    }
+}
+
 fn create(
     target: &EventLoopWindowTarget<Command>,
+    proxy: &EventLoopProxy<Command>,
     id: WindowId,
     opts: WindowOptions,
     windows: &HashMap<WindowId, Entry>,
@@ -1031,6 +1070,10 @@ fn create(
     };
     builder = opts.apply_webview(builder)?;
 
+    let load_proxy = proxy.clone();
+    builder = builder.with_on_page_load_handler(move |ev, _url| {
+        let _ = load_proxy.send_event(Command::PageLoad(id, matches!(ev, wry::PageLoadEvent::Finished)));
+    });
     let ipc_emit = emit.clone();
     // Inline HTML comes from the host itself, so it is trusted like app://.
     let trust_inline = opts.url.is_none() && opts.html.is_some();
@@ -1126,6 +1169,8 @@ fn create(
         menu: None,
         popup: None,
         prevent_close: opts.prevent_close,
+        loading: true,
+        queued: Vec::new(),
         webview,
         window,
         _context: context,
