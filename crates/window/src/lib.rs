@@ -48,11 +48,75 @@ pub enum HostEvent {
     DragDrop { window: WindowId, kind: &'static str, paths: Vec<String>, x: i32, y: i32 },
     /// The user asked to close the window. It is already destroyed.
     Closed { window: WindowId },
+    /// The window could not be created (bad options, duplicate label, ...).
+    CreateFailed { window: WindowId, message: String },
     Error { window: Option<WindowId>, message: String },
     /// Something was ignored, e.g. an unknown or unsupported window option.
     Warning { window: Option<WindowId>, message: String },
     /// The UI thread's event loop has stopped.
     Exited,
+}
+
+impl HostEvent {
+    /// The window this event is about, if any.
+    pub fn window(&self) -> Option<WindowId> {
+        match self {
+            HostEvent::Created { window }
+            | HostEvent::Invoke { window, .. }
+            | HostEvent::DragDrop { window, .. }
+            | HostEvent::Closed { window }
+            | HostEvent::CreateFailed { window, .. } => Some(*window),
+            HostEvent::Error { window, .. } | HostEvent::Warning { window, .. } => *window,
+            HostEvent::Exited => None,
+        }
+    }
+
+    /// JSON for a JS host: `{"type": "invoke", "window": 1, ...}`.
+    /// `args` of an invoke is embedded as JSON, not as a string.
+    pub fn to_json(&self) -> String {
+        use serde_json::json;
+        let v = match self {
+            HostEvent::Created { window } => json!({ "type": "created", "window": window }),
+            HostEvent::Invoke { window, call, cmd, args, origin, remote } => json!({
+                "type": "invoke", "window": window, "call": call, "cmd": cmd,
+                "args": serde_json::from_str::<serde_json::Value>(args).unwrap_or(serde_json::Value::Null),
+                "origin": origin, "remote": remote,
+            }),
+            HostEvent::DragDrop { window, kind, paths, x, y } => {
+                json!({ "type": "dragdrop", "window": window, "kind": kind, "paths": paths, "x": x, "y": y })
+            }
+            HostEvent::Closed { window } => json!({ "type": "closed", "window": window }),
+            HostEvent::CreateFailed { window, message } => json!({ "type": "createfailed", "window": window, "message": message }),
+            HostEvent::Error { window, message } => json!({ "type": "error", "window": window, "message": message }),
+            HostEvent::Warning { window, message } => json!({ "type": "warning", "window": window, "message": message }),
+            HostEvent::Exited => json!({ "type": "exited" }),
+        };
+        v.to_string()
+    }
+}
+
+/// Serves files from a directory on disk. Paths that try to leave the
+/// directory (`..`, absolute, drive letters) are refused.
+pub struct DirAssets(pub std::path::PathBuf);
+
+impl AssetProvider for DirAssets {
+    fn get(&self, path: &str) -> Option<Asset> {
+        let rel = std::path::Path::new(path);
+        if rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            return None;
+        }
+        let bytes = std::fs::read(self.0.join(rel)).ok()?;
+        Some(Asset { bytes: Cow::Owned(bytes), mime: Cow::Borrowed(mime_for(path)) })
+    }
+}
+
+/// Serves nothing; `app://` answers 404.
+pub struct NoAssets;
+
+impl AssetProvider for NoAssets {
+    fn get(&self, _: &str) -> Option<Asset> {
+        None
+    }
 }
 
 /// A file served under [`ASSET_ROOT`].
@@ -194,7 +258,7 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
                         windows.insert(id, entry);
                         emit(HostEvent::Created { window: id });
                     }
-                    Err(e) => emit(HostEvent::Error { window: Some(id), message: e }),
+                    Err(e) => emit(HostEvent::CreateFailed { window: id, message: e }),
                 },
                 Command::Eval(id, js) => {
                     if let Some(e) = windows.get(&id) {
@@ -515,5 +579,26 @@ mod tests {
         assert!(matches!(ipc_access(&u("http://app.localhost.evil.com/"), false, &none), Access::Denied));
         let p = IpcPolicy { remote: vec!["https://example.com".into()], remote_commands: None };
         assert!(matches!(ipc_access(&u("https://example.com/"), false, &p), Access::Remote));
+    }
+
+    #[test]
+    fn event_json() {
+        let ev = HostEvent::Invoke { window: 2, call: 7, cmd: "greet".into(), args: r#"{"name":"x"}"#.into(), origin: "http://app.localhost/".into(), remote: false };
+        let v: serde_json::Value = serde_json::from_str(&ev.to_json()).unwrap();
+        assert_eq!(v["type"], "invoke");
+        assert_eq!(v["args"]["name"], "x");
+        assert_eq!(ev.window(), Some(2));
+    }
+
+    #[test]
+    fn dir_assets_stay_inside() {
+        let dir = std::env::temp_dir().join("buntauri-assets-test");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("a.txt"), b"hi").unwrap();
+        let a = DirAssets(dir);
+        assert_eq!(&*a.get("sub/a.txt").unwrap().bytes, b"hi");
+        assert!(a.get("../secret.txt").is_none());
+        assert!(a.get("sub/../../x").is_none());
+        assert!(a.get("C:/Windows/win.ini").is_none());
     }
 }

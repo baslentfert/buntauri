@@ -11,3 +11,6 @@ wry = "0.57"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+
+# Own lint policy; do not inherit the lints of a workspace this crate is built in (e.g. Bun).
+[lints]

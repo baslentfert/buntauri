@@ -83,6 +83,13 @@ fn main() {
                 }
             }
             HostEvent::DragDrop { window, kind, paths, x, y } => println!("[host] drag {kind} {paths:?} at {x},{y} in window {window}"),
+            HostEvent::CreateFailed { window, message } => {
+                eprintln!("[host] window {window} failed: {message}");
+                open -= 1;
+                if open == 0 {
+                    break;
+                }
+            }
             HostEvent::Warning { window, message } => eprintln!("[host] warning (window {window:?}): {message}"),
             HostEvent::Closed { window } => {
                 println!("[host] window {window} closed");

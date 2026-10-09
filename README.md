@@ -5,7 +5,21 @@ Goal: `bun build --compile` produces one desktop `.exe`, like Wails, with the fr
 
 > **Unofficial.** buntauri is an independent project. It is not affiliated with, endorsed by or sponsored by Oven (Bun) or The Tauri Programme within The Commons Conservancy. "Bun" and "Tauri" are used only to describe what this project builds on.
 
-> Early stage. The window layer works standalone; Bun integration is next.
+> Early stage. Works on Windows in a self-built Bun: `import { Window } from "bun:buntauri"`.
+
+## Use it from Bun
+
+```ts
+import { Window, setAssetsDir } from "bun:buntauri";
+
+setAssetsDir(import.meta.dir + "/assets");          // served as app://
+const win = new Window({ title: "Hello", url: "index.html", width: 800, height: 600, center: true });
+win.handle("greet", ({ name }) => `Hello ${name}`); // page: await __BUNTAURI__.invoke("greet", { name })
+win.on("closed", () => console.log("bye"));          // Bun exits when the last window closes
+```
+
+Building Bun with buntauri (Windows): `bun scripts/sync.ts ../bun` then `pwsh scripts/build-bun.ps1`.
+See [examples/bun](examples/bun) and [BUNTAURI.md](BUNTAURI.md).
 
 ## Try the window layer
 

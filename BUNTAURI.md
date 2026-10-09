@@ -16,8 +16,9 @@ buntauri/
   bun-glue/                 NIEUWE bestanden die 1-op-1 in de Bun-tree gekopieerd worden
     src/runtime/buntauri/   Window.classes.ts, Window.rs (JS-binding -> crates/window)
   patches/                  kleine edits op BESTAANDE Bun-bestanden (alleen registratie)
-  scripts/sync.ts           checkout Bun @ UPSTREAM -> ./bun, kopieer bun-glue, pas patches toe
-  bun/                      gegenereerd, niet in git
+  scripts/sync.ts           kopieer bun-glue naar een Bun-checkout en pas de edits toe
+  scripts/build-bun.ps1     Bun bouwen op Windows (kiest de juiste VS + LLVM)
+  examples/bun/             voorbeeld-app voor bun:buntauri
 ```
 
 ## Regels voor de lijm
@@ -42,9 +43,9 @@ buntauri/
 ## Nieuwe Bun-release overnemen
 
 1. `UPSTREAM` aanpassen naar de nieuwe tag.
-2. `bun scripts/sync.ts` – faalt een patch, dan alleen dat hunk herstellen.
-3. Bouwen met feature `buntauri`.
-4. Selftest draaien.
+2. `bun scripts/sync.ts [pad/naar/bun]` – faalt een anker, dan alleen dat anker herstellen.
+3. `pwsh scripts/build-bun.ps1`.
+4. Selftest draaien. Nieuwe E0283-fout (`as _` dubbelzinnig)? Regel toevoegen aan `typeFixes` in `sync.ts`.
 
 ## Threading
 
@@ -55,10 +56,15 @@ buntauri/
 ## Status
 
 - [x] `crates/window`: UI-thread, vensters, `app://` assets, invoke/resolve/reject, events,
-      IPC alleen vanaf `app://` (externe pagina's geblokkeerd).
+      IPC alleen vanaf `app://` of toegestane URL-patronen, Tauri-compatibele vensteropties.
       Test: `cargo run --example demo` (`BUNTAURI_SELFTEST=1` voor de automatische test).
-- [ ] Fase 0: vanilla Bun bouwen (LLVM 23.1.1, rustup nightly, Go, NASM, Perl, Ruby).
-- [ ] Fase 1: `bun-glue` + `patches` -> `Bun.Window` in JS.
-- [ ] Fase 2: assets uit `--compile`-graph, `@tauri-apps/api`-compat (`invoke`).
-- [ ] Fase 3: `buntauri build`, menu's (muda), tray (tray-icon), manifest/icon.
+- [x] Fase 0: Bun bouwen op Windows: `pwsh scripts/build-bun.ps1`
+      (VS 2022 17.14 / MSVC 14.44 met ATL, LLVM 23.1.1 via scoop, Perl, NASM).
+- [x] Fase 1: `bun:buntauri` in Bun via `bun scripts/sync.ts` (bun-glue + ankerpunt-edits + typefixes).
+      Test: `BUNTAURI_SELFTEST=1 bun-debug examples/bun/hello.ts`.
+- [ ] Release-build: 9 extra Windows-DLL's toestaan + delay-loaden (`binary-expectations.ts`, `flags.ts`).
+- [ ] Typefixes upstream bij Bun indienen (PR), dan verdwijnen ze uit `sync.ts`.
+- [ ] Fase 2: assets uit de `--compile`-graph, `@tauri-apps/api`-compat (`invoke`).
+- [ ] Fase 3: `buntauri build`, venster-icoon, tray (tray-icon), menu's (muda), manifest, signing
+      (Azure Artifact Signing, instelbaar per app).
 - [ ] Fase 4: macOS (host-subproces), Linux.
