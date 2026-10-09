@@ -14,10 +14,11 @@ export function buntauriLinkLibs(cfg: Config): string[] {
   if (cfg.darwin) {
     // AppKit/Foundation: windows and menus; CoreFoundation/CoreGraphics: tao;
     // Carbon: keyboard layouts (TIS*, UCKeyTranslate); WebKit: WKWebView
-    // (looked up by name at run time, so it must be linked even though no
-    // symbol references it); objc: the Objective-C runtime.
-    const frameworks = ["AppKit", "Foundation", "CoreFoundation", "CoreGraphics", "Carbon", "WebKit"];
-    return [...frameworks.map(f => `-Wl,-framework,${f}`), "-lobjc"];
+    // (looked up by name at run time); objc: the Objective-C runtime.
+    // WebKit is linked as *needed*: Bun links with -dead_strip_dylibs, which
+    // would drop it since no symbol references it.
+    const frameworks = ["AppKit", "Foundation", "CoreFoundation", "CoreGraphics", "Carbon"];
+    return [...frameworks.map(f => `-Wl,-framework,${f}`), "-Wl,-needed_framework,WebKit", "-lobjc"];
   }
   if ((cfg.linux && cfg.abi !== "android") || cfg.freebsd) {
     // GTK 3 for tao/muda, WebKitGTK for wry. Their Requires pull in glib, gio,

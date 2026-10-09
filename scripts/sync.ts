@@ -37,6 +37,17 @@ const WINDOWS_UI_DLLS = [
   "shlwapi.dll",
 ];
 
+// What those frameworks add to bun's Mach-O load commands on macOS.
+const MACOS_UI_LIBS = [
+  "/usr/lib/libobjc.A.dylib",
+  "/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit",
+  "/System/Library/Frameworks/Carbon.framework/Versions/A/Carbon",
+  "/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics",
+  "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+  "/System/Library/Frameworks/Foundation.framework/Versions/A/Foundation",
+  "/System/Library/Frameworks/WebKit.framework/Versions/A/WebKit",
+];
+
 type Edit = {
   file: string;
   /** Text that must exist; the insertion goes right after (or before) it. */
@@ -142,6 +153,13 @@ const edits: Edit[] = [
     anchor: /^ {2}return libs;\n\}/m,
     before: true,
     insert: `  libs.push(...buntauriLinkLibs(cfg)); // ${MARK}\n`,
+  },
+  // macOS: allow those frameworks in bun's binary check (Mach-O case is the only `allowed: sanitizerLibs,`).
+  {
+    file: "scripts/build/binary-expectations.ts",
+    anchor: "          allowed: sanitizerLibs,\n",
+    replace: () => `          allowed: [...sanitizerLibs, ...${JSON.stringify(MACOS_UI_LIBS)}] /* ${MARK} */,\n`,
+    present: `allowed: [...sanitizerLibs, ...["/usr/lib/libobjc.A.dylib"`,
   },
   // Windows: the system DLLs tao/wry import. Allowed in the binary check and
   // delay-loaded, so they are only mapped once a window is opened.
