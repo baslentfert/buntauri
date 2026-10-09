@@ -130,6 +130,19 @@ const edits: Edit[] = [
     anchor: `    "bun:ffi"_s,\n`,
     insert: `    "bun:buntauri"_s, // ${MARK}\n`,
   },
+  // macOS/Linux: frameworks and shared libraries tao/wry need at link time
+  // (bun-glue/scripts/build/buntauri-libs.ts); Bun only links its own list.
+  {
+    file: "scripts/build/bun.ts",
+    anchor: `import { streamPath } from "./stream.ts";\n`,
+    insert: `import { buntauriLinkLibs } from "./buntauri-libs.ts"; // ${MARK}\n`,
+  },
+  {
+    file: "scripts/build/bun.ts",
+    anchor: /^ {2}return libs;\n\}/m,
+    before: true,
+    insert: `  libs.push(...buntauriLinkLibs(cfg)); // ${MARK}\n`,
+  },
   // Windows: the system DLLs tao/wry import. Allowed in the binary check and
   // delay-loaded, so they are only mapped once a window is opened.
   {
