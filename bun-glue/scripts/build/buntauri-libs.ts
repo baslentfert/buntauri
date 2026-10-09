@@ -113,17 +113,21 @@ void *buntauri_stub_dlopen(const char *lib) {
       run([cfg.cc, `-print-file-name=${file}`], `looking up ${file}`).trim();
     if (!existsSync(found)) throw new Error(`buntauri: ${file} not found (from pkg-config ${flag})`);
     const so = realpathSync(found);
-    const archive = join(dir, `lib${flag.slice(2)}-stub.a`);
+    // javascriptcoregtk is WebKit's JavaScriptCore with a GLib API on top. bun
+    // links its own JavaScriptCore and WTF statically, so a stub for the whole
+    // export list (the C API JSValue*, C++ JSC::/WTF:: symbols, WTFCrash, ...)
+    // would define thousands of symbols a second time. WebKitGTK and wry only
+    // need the GLib API: stub just jsc_*. Its own name, so an older full stub
+    // in an existing build directory is never reused.
+    const jscOnly = flag.startsWith("-ljavascriptcoregtk");
+    const archive = join(dir, `lib${flag.slice(2)}-stub${jscOnly ? ".jsc-only" : ""}.a`);
     if (!existsSync(archive) || statSync(archive).mtimeMs < statSync(so).mtimeMs) {
-      // javascriptcoregtk also exports the JavaScriptCore C API (JSValue*,
-      // JSString*, ...), which bun links statically: stubs for those are
-      // duplicate symbols. WebKitGTK and wry only need its GLib API (jsc_*).
       const only: string[] = [];
-      if (flag.startsWith("-ljavascriptcoregtk")) {
+      if (jscOnly) {
         const syms = run(["nm", "-D", "--defined-only", so], `listing the symbols of ${file}`)
           .split("\n")
           .map(line => line.trim().split(/\s+/))
-          .filter(([, type, name]) => type === "T" && name && !name.startsWith("JS"))
+          .filter(([, type, name]) => type === "T" && name?.startsWith("jsc_"))
           .map(([, , name]) => name);
         const list = join(dir, `${file}.symbols`);
         writeFileSync(list, syms.join("\n") + "\n");
