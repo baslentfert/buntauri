@@ -62,15 +62,6 @@ jobs:
           wget -q https://apt.llvm.org/llvm.sh -O - | sudo bash -s -- 23 all
           which clang-23
 
-      - name: GTK/WebKitGTK stubs
-        # Lazy-loading stubs (Implib.so) so bun has no NEEDED entry on GTK/WebKitGTK
-        # and starts without them; see scripts/linux-stubs/README.md.
-        run: |
-          git clone -q https://github.com/yugr/Implib.so implib
-          git -C implib checkout -q a3e167cf978a5b8a38ec0f710d8c4331e8dcdd9a
-          bash buntauri/scripts/linux-stubs/gen-stubs.sh "$PWD/implib" "$PWD/stubs"
-          echo "BUNTAURI_LINUX_STUBS=$PWD/stubs" >> "$GITHUB_ENV"
-
       - name: Window crate tests
         working-directory: buntauri
         run: cargo test
@@ -125,8 +116,9 @@ jobs:
         run: |
           exe=build/${{ inputs.profile }}/bun${{ inputs.profile == 'debug' && '-debug' || '' }}
           readelf -d "$exe" | grep NEEDED
-          if readelf -d "$exe" | grep NEEDED | grep -E "gtk|gdk|webkit|javascriptcoregtk|glib|gobject|soup|cairo|pango"; then
-            echo "bun still has GTK/WebKitGTK as NEEDED"; exit 1
+          # Only the libraries every Linux system has (Bun's own rule: libc, libdl, libm, libpthread).
+          if readelf -d "$exe" | grep NEEDED | grep -vE "\[(libc|libdl|libm|libpthread|libgcc_s|ld-linux[^]]*)\.so"; then
+            echo "bun has NEEDED entries beyond the system libraries"; exit 1
           fi
           "$exe" -e 'console.log("bun starts:", Bun.version)'
 
