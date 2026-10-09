@@ -130,6 +130,14 @@ jobs:
           exe=../bun/build/${{ inputs.profile }}/bun${{ inputs.profile == 'debug' && '-debug' || '' }}
           BUNTAURI_SELFTEST=1 timeout 120 dbus-run-session -- xvfb-run -a "$exe" examples/bun/hello.ts
 
+      - name: Stress test (xvfb)
+        # Bun's JavaScriptCore under load (forced GC, a busy worker) while a window
+        # does thousands of evaluate/invoke round trips through the UI host.
+        working-directory: buntauri
+        run: |
+          exe=../bun/build/${{ inputs.profile }}/bun${{ inputs.profile == 'debug' && '-debug' || '' }}
+          STRESS_ROUNDS=2000 timeout 150 dbus-run-session -- xvfb-run -a "$exe" examples/bun/stress.ts
+
       - name: Upload Bun
         uses: actions/upload-artifact@v4
         with:
