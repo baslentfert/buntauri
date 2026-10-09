@@ -57,6 +57,8 @@ jobs:
             ninja-build pkg-config ruby-full xz-utils ccache nasm
           # tao/wry/tray-icon: GTK 3, WebKitGTK 4.1, appindicator for the tray.
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
+          # A virtual display for the window test.
+          sudo apt-get install -y xvfb dbus-x11
           wget -q https://apt.llvm.org/llvm.sh -O - | sudo bash -s -- 23 all
           which clang-23
 
@@ -79,7 +81,9 @@ jobs:
         # lld warnings that push the real errors out of the Actions log.
         run: |
           set -o pipefail
-          bun run build:${{ inputs.profile }} 2>&1 | tee ../build.log | grep -v "Linking two modules of different target triples"
+          # No LTO on Linux CI: a much lighter link on the 16 GB runner (mac-buntauri builds locally the same way).
+          lto=$([ "${{ inputs.profile }}" = release ] && echo "--lto=off" || true)
+          bun scripts/build.ts --profile=${{ inputs.profile }} $lto 2>&1 | tee ../build.log | grep -v "Linking two modules of different target triples"
 
       - name: Build errors
         if: failure()
@@ -108,6 +112,14 @@ jobs:
           exe=build/${{ inputs.profile }}/bun${{ inputs.profile == 'debug' && '-debug' || '' }}
           "$exe" --revision
           "$exe" -e 'const m = await import("bun:buntauri"); console.log("bun:buntauri exports:", Object.keys(m.default ?? m))'
+
+      - name: Window test (xvfb)
+        # Opens a real window: catches clashes between Bun's JavaScriptCore and
+        # the one WebKitGTK brings (libjavascriptcoregtk), which only show at run time.
+        working-directory: buntauri
+        run: |
+          exe=../bun/build/${{ inputs.profile }}/bun${{ inputs.profile == 'debug' && '-debug' || '' }}
+          BUNTAURI_SELFTEST=1 timeout 120 dbus-run-session -- xvfb-run -a "$exe" examples/bun/hello.ts
 
       - name: Upload Bun
         uses: actions/upload-artifact@v4
