@@ -26,6 +26,15 @@ jobs:
           sudo docker image prune --all --force || true
           df -h /
 
+      - name: Add swap
+        # Bun's release link (ThinLTO over all of Bun) needs more than the
+        # runner's 16 GB; without swap the linker dies without a message.
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /swapfile2 && sudo chmod 600 /swapfile2
+          sudo mkswap /swapfile2 && sudo swapon /swapfile2
+          free -h
+
       - uses: actions/checkout@v4
         with:
           path: buntauri
@@ -69,6 +78,10 @@ jobs:
       - name: Build errors
         if: failure()
         run: |
+          echo "--- memory / OOM killer"
+          free -h
+          sudo dmesg 2>/dev/null | grep -iE "out of memory|killed process|oom" | tail -5 || true
+          echo "--- errors from build.log"
           grep -v "Linking two modules of different target triples" build.log             | grep -iE "error|undefined|not found|cannot|unable|FAILED|not expected|violation"             | grep -vE "type error|ts-expect|TS[0-9]{4}" | head -150 || true
 
       - name: Upload build log
