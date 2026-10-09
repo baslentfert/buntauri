@@ -468,7 +468,7 @@ mod tests {
         // A window entry as it appears in tauri.conf.json.
         let o = WindowOptions::from_json(
             r##"{
-                "label": "main", "title": "Mijn app", "width": 1024, "height": 768,
+                "label": "main", "title": "My app", "width": 1024, "height": 768,
                 "minWidth": 400, "center": true, "resizable": false, "alwaysOnTop": true,
                 "theme": "dark", "backgroundColor": "#11223380", "decorations": false,
                 "preventOverflow": { "width": 10, "height": 20 }, "scrollBarStyle": "fluentOverlay",
@@ -478,7 +478,7 @@ mod tests {
             }"##,
         )
         .unwrap();
-        assert_eq!(o.title, "Mijn app");
+        assert_eq!(o.title, "My app");
         assert_eq!((o.width, o.height), (1024.0, 768.0));
         assert_eq!(o.min_width, Some(400.0));
         assert!(o.center && !o.resizable && o.always_on_top && !o.decorations);

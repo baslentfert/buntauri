@@ -15,14 +15,14 @@ const win = new Window({
   theme: "dark",
 });
 
-win.handle("greet", ({ name }) => `Hallo ${name}, groeten van Bun ${Bun.version}!`);
+win.handle("greet", ({ name }) => `Hello ${name}, greetings from Bun ${Bun.version}!`);
 win.handle("versions", () => ({ bun: Bun.version, platform: process.platform, pid: process.pid }));
 win.handle("slow", async () => {
   await Bun.sleep(200);
-  return "na 200 ms";
+  return "after 200 ms";
 });
 win.handle("fail", () => {
-  throw new Error("expres fout");
+  throw new Error("failed on purpose");
 });
 win.handle("done", async result => {
   console.log("selftest:", JSON.stringify(result));
@@ -31,9 +31,9 @@ win.handle("done", async result => {
   win.close();
 });
 
-win.on("created", () => console.log("venster open"));
-win.on("closed", () => console.log("venster dicht, Bun stopt vanzelf"));
-win.on("warning", msg => console.warn("waarschuwing:", msg));
+win.on("created", () => console.log("window open"));
+win.on("closed", () => console.log("window closed, Bun exits by itself"));
+win.on("warning", msg => console.warn("warning:", msg));
 
 await win.ready;
 win.emit("hello", { from: "bun" });

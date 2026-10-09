@@ -57,8 +57,8 @@ fn main() {
                 match cmd.as_str() {
                     "greet" => {
                         let args: serde_json::Value = serde_json::from_str(&args).unwrap();
-                        let name = args["name"].as_str().unwrap_or("onbekende");
-                        let reply = serde_json::json!(format!("Hallo {name}, groeten van de host-thread!"));
+                        let name = args["name"].as_str().unwrap_or("stranger");
+                        let reply = serde_json::json!(format!("Hello {name}, greetings from the host thread!"));
                         ui.resolve(window, call, &reply.to_string());
                     }
                     "uptime" => ui.resolve(window, call, &started.elapsed().as_secs_f64().to_string()),

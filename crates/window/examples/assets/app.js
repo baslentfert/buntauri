@@ -7,11 +7,11 @@ listen("tick", (n) => log(`event tick ${n}`));
 
 $("greet").onclick = async () => log(await invoke("greet", { name: $("name").value }));
 $("uptime").onclick = async () => log(`uptime: ${(await invoke("uptime")).toFixed(2)}s`);
-$("title").onclick = async () => { await invoke("title", { title: `buntauri - ${new Date().toLocaleTimeString()}` }); log("titel gewijzigd"); };
+$("title").onclick = async () => { await invoke("title", { title: `buntauri - ${new Date().toLocaleTimeString()}` }); log("title changed"); };
 $("tick").onclick = () => invoke("tick");
-$("bad").onclick = () => invoke("nope").catch((e) => log(`fout: ${e.message}`));
+$("bad").onclick = () => invoke("nope").catch((e) => log(`error: ${e.message}`));
 
-log(`geladen vanaf ${location.href}`);
+log(`loaded from ${location.href}`);
 
 if (new URLSearchParams(location.search).has("selftest")) {
   (async () => {

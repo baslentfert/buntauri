@@ -42,11 +42,13 @@ Wrong types (`"width": "wide"`, `"theme": "blue"`) are errors.
 | `create` | — | The host creates windows itself |
 | `ipc` | ✅ | buntauri extra: `{ remote: [urlPatterns], remoteCommands: [names] }` |
 
-## From Bun JS (phase 1)
+## From Bun
 
 ```ts
-const win = new Bun.Window({
-  title: "Mijn app",
+import { Window } from "bun:buntauri";
+
+const win = new Window({
+  title: "My app",
   width: 1024, height: 768, minWidth: 400,
   center: true, theme: "dark", backgroundColor: "#111",
 });

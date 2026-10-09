@@ -2,8 +2,8 @@
 // Copied from the buntauri repo (bun-glue/); edit it there.
 //
 //   import { Window } from "bun:buntauri";
-//   const win = new Window({ title: "Hallo", url: "index.html" });
-//   win.handle("greet", ({ name }) => `Hallo ${name}`);
+//   const win = new Window({ title: "Hello", url: "index.html" });
+//   win.handle("greet", ({ name }) => `Hello ${name}`);
 //
 // Options use the names of Tauri's WindowConfig (tauri.conf.json).
 // Pages call `await window.__BUNTAURI__.invoke(cmd, args)`.
