@@ -82,6 +82,15 @@ What it means for buntauri:
 - **Linux**: wry needs **WebKitGTK 4.1**, which starts at **Ubuntu 22.04 / Debian 12**, so a
   buntauri Linux build cannot share Bun's glibc 2.31 baseline. Plan: a separate Linux variant
   with a 22.04+ baseline (native build, or a 22.04 sysroot that includes GTK/WebKitGTK).
+- **Bun's Linux binary is strictly portable** (`scripts/build/binary-expectations.ts`): no glibc
+  symbol newer than **2.17**, and NEEDED is exactly `libc.so.6 libdl.so.2 libm.so.6 libpthread.so.0`
+  (libstdc++ is static). Kernel 3.10+ runs, 5.6+ recommended (docs/installation.mdx).
+  Linking GTK/WebKitGTK into `bun` breaks all of that, so even window-less scripts would need GTK,
+  and WebKitGTK brings a second JavaScriptCore (`libjavascriptcoregtk`) next to Bun's.
+  **Plan for Linux**: the macOS pattern, a UI host subprocess that loads GTK/WebKitGTK at run
+  time (dlopen of a helper library), so `bun` stays portable, GTK is only needed when a window
+  opens, and the two JavaScriptCores live in separate processes. The current CI build (linked
+  directly) is a probe: does it link, and do the two JSCs clash in a real window (xvfb test)?
 - **macOS and Windows could be built from Linux too**, like Bun does: the frameworks we link
   (AppKit, WebKit, ...) are .tbd stubs in the Apple SDK, and macOS signing/notarizing works
   from Linux with `rcodesign`. One Linux runner could then produce all platforms; the Mac and
