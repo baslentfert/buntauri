@@ -70,7 +70,7 @@ buntauri/
 - [x] Phase 2a: assets from the `--compile` exe (zero-copy from the graph; bunfs URLs in
       HTML/CSS/JS rewritten to `/`). One exe:
       `bun build --compile --windows-hide-console examples/bun/hello.ts examples/bun/assets/index.html`.
-- [ ] Release build: Windows UI DLLs allowed + delay-loaded (in progress).
+- [x] Release build: Windows UI DLLs allowed + delay-loaded. `bun.exe` and a compiled app are ~97 MB.
 - [ ] Submit the type fixes to Bun (PR), so they drop out of `sync.ts`.
 - [ ] Phase 2b: `@tauri-apps/api` compatibility (`invoke`).
 - [ ] Phase 3: `buntauri build`, window icon, tray (tray-icon), menus (muda), manifest,

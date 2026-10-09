@@ -24,6 +24,19 @@ const MARK = "buntauri";
 // Path from Bun's root Cargo.toml to our crate, with forward slashes.
 const crateDir = relative(bun, join(repo, "crates", "window")).replaceAll("\\", "/");
 
+// System DLLs that tao/wry/WebView2 add to bun.exe's imports (all present on Windows 10+).
+const WINDOWS_UI_DLLS = [
+  "combase.dll",
+  "rpcrt4.dll",
+  "comctl32.dll",
+  "gdi32.dll",
+  "dwmapi.dll",
+  "api-ms-win-core-winrt-error-l1-1-0.dll",
+  "imm32.dll",
+  "propsys.dll",
+  "shlwapi.dll",
+];
+
 type Edit = {
   file: string;
   /** Text that must exist; the insertion goes right after (or before) it. */
@@ -116,6 +129,20 @@ const edits: Edit[] = [
     file: "src/jsc/modules/NodeModuleModule.cpp",
     anchor: `    "bun:ffi"_s,\n`,
     insert: `    "bun:buntauri"_s, // ${MARK}\n`,
+  },
+  // Windows: the system DLLs tao/wry import. Allowed in the binary check and
+  // delay-loaded, so they are only mapped once a window is opened.
+  {
+    file: "scripts/build/binary-expectations.ts",
+    anchor: /"ole32\.dll",\n\s*\],\n\s*exact: true,[\s\S]*?allowed: \[\.\.\.sanitizerLibs,/,
+    replace: m => m + ` ...${JSON.stringify(WINDOWS_UI_DLLS)} /* ${MARK} */,`,
+    present: `/* ${MARK} */`,
+  },
+  {
+    file: "scripts/build/flags.ts",
+    anchor: `      "/delayload:USERENV.dll",\n`,
+    insert: WINDOWS_UI_DLLS.map(d => `      "/delayload:${d}", // ${MARK}\n`).join(""),
+    present: `"/delayload:${WINDOWS_UI_DLLS[0]}", // ${MARK}`,
   },
 ];
 
