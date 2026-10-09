@@ -697,8 +697,25 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
         }));
     }
 
+    // Windows to snapshot again a little later: some operations take effect
+    // asynchronously (on macOS: resizing, always-on-top, devtools).
+    let mut resnap: Vec<(std::time::Instant, WindowId)> = Vec::new();
+
     event_loop.run_return(|event, target, control_flow| {
-        *control_flow = ControlFlow::Wait;
+        let now = std::time::Instant::now();
+        resnap.retain(|&(at, id)| {
+            if at > now {
+                return true;
+            }
+            if let Some(e) = windows.get(&id) {
+                snap(id, e);
+            }
+            false
+        });
+        *control_flow = match resnap.iter().map(|&(at, _)| at).min() {
+            Some(at) => ControlFlow::WaitUntil(at),
+            None => ControlFlow::Wait,
+        };
         match event {
             Event::UserEvent(cmd) => match cmd {
                 Command::Create(id, opts) => match create(target, id, opts, &windows, &emit, &assets) {
@@ -737,6 +754,11 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
                             emit(HostEvent::Error { window: Some(id), message });
                         }
                         snap(id, e);
+                        for ms in [100, 600] {
+                            resnap.push((now + std::time::Duration::from_millis(ms), id));
+                        }
+                        let first = resnap.iter().map(|&(at, _)| at).min().unwrap();
+                        *control_flow = ControlFlow::WaitUntil(first);
                     }
                 }
                 Command::SetIcon(id, (rgba, w, h)) => {

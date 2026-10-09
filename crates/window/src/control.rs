@@ -124,6 +124,12 @@ pub(crate) fn apply(window: &Window, webview: &wry::WebView, op: &WindowOp, prev
 /// What the host can read at any time (`win.state` in JS).
 pub(crate) fn snapshot(window: &Window, webview: &wry::WebView, prevent_close: bool) -> Value {
     let scale = window.scale_factor();
+    // macOS: tao's inner_size reads its own view, which keeps its first size
+    // once wry has put the webview in; the webview itself shrinks when the
+    // devtools are docked. The window's content rect is the real inner size.
+    #[cfg(target_os = "macos")]
+    let size = content_size(window).unwrap_or_else(|| window.inner_size().to_logical::<f64>(scale));
+    #[cfg(not(target_os = "macos"))]
     let size = window.inner_size().to_logical::<f64>(scale);
     let pos = window.outer_position().map(|p| p.to_logical::<f64>(scale)).ok();
     json!({
@@ -144,6 +150,16 @@ pub(crate) fn snapshot(window: &Window, webview: &wry::WebView, prevent_close: b
         "url": webview.url().ok(),
         "devtoolsOpen": webview.is_devtools_open(),
     })
+}
+
+/// The window's content area in points (= logical pixels).
+#[cfg(target_os = "macos")]
+fn content_size(window: &Window) -> Option<LogicalSize<f64>> {
+    use tao::platform::macos::WindowExtMacOS;
+    // SAFETY: ns_window is this live window's NSWindow, used on the main thread.
+    let ns = unsafe { (window.ns_window() as *const objc2_app_kit::NSWindow).as_ref() }?;
+    let rect = ns.contentRectForFrameRect(ns.frame());
+    Some(LogicalSize::new(rect.size.width, rect.size.height))
 }
 
 #[cfg(test)]

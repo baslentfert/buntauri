@@ -279,6 +279,8 @@ dependencies = [
  "global-hotkey",
  "muda",
  "notify-rust",
+ "objc2-app-kit",
+ "objc2-foundation",
  "open",
  "png",
  "raw-window-handle",
