@@ -7,6 +7,7 @@
 // scripts) never reach the link. Static ones are bundled into the rlibs, which
 // is why Windows needs nothing here. This list fills the gap per OS.
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import type { Config } from "./config.ts";
 
 /** Linker arguments to append to Bun's system libs. */
@@ -33,8 +34,23 @@ export function buntauriLinkLibs(cfg: Config): string[] {
           (r.stderr ?? ""),
       );
     }
+    let libs = r.stdout.trim().split(/\s+/).filter(Boolean);
+    // BUNTAURI_LINUX_STUBS: a directory made by scripts/linux-stubs/gen-stubs.sh.
+    // Link GTK/WebKitGTK through lazy-loading stubs instead of NEEDED entries, so
+    // `bun` starts on machines without them (only opening a window needs them).
+    const stubs = process.env.BUNTAURI_LINUX_STUBS;
+    if (stubs) {
+      if (!existsSync(`${stubs}/libbuntauri-stub-dlopen.a`)) {
+        throw new Error(`buntauri: BUNTAURI_LINUX_STUBS=${stubs} has no stubs; run scripts/linux-stubs/gen-stubs.sh`);
+      }
+      libs = libs.map(arg => {
+        const stub = arg.startsWith("-l") ? `${stubs}/lib${arg.slice(2)}-stub.a` : undefined;
+        return stub && existsSync(stub) ? stub : arg;
+      });
+      libs.push(`${stubs}/libbuntauri-stub-dlopen.a`, "-ldl");
+    }
     // All undefined symbols at once, not just the first 20.
-    return [...r.stdout.trim().split(/\s+/).filter(Boolean), "-Wl,--error-limit=0"];
+    return [...libs, "-Wl,--error-limit=0"];
   }
   return [];
 }

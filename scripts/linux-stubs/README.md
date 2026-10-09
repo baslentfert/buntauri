@@ -6,7 +6,7 @@ not even for a script without a window. ELF has no delay-load (Windows) or weak
 framework (macOS), so this emulates it with [Implib.so](https://github.com/yugr/Implib.so):
 link against small stub archives that `dlopen` the real library on first call.
 
-- `gen-stubs.sh`: generates `/stubs/lib<name>-stub.a` for each GTK/WebKitGTK library
+- `gen-stubs.sh <implib-dir> <out-dir>`: generates `lib<name>-stub.a` for each GTK/WebKitGTK library
   (needs `implib-gen.py` at `/implib` and the -dev packages, see `Dockerfile`).
 - `cc-wrap.sh`: linker wrapper that replaces `-l<name>` by the stub archive.
   Bun's link would do the same in `scripts/build/buntauri-libs.ts`.
