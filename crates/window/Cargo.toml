@@ -35,6 +35,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 muda = { version = "0.21", default-features = false, features = ["gtk3"] }
 tray-icon = { version = "0.26", default-features = false, features = ["libappindicator"] }
 rfd = { version = "0.17", default-features = false, features = ["gtk3"] }
+# GTK types for the menu bar / context menu (the version tao and muda use).
+gtk = "0.18"
 notify-rust = { version = "4.18", default-features = false, features = ["z"] }
 
 # Own lint policy; do not inherit the lints of a workspace this crate is built in (e.g. Bun).

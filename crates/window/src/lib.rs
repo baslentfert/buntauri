@@ -1140,10 +1140,24 @@ fn set_menu_bar(e: &mut Entry, id: WindowId, specs: Option<Vec<MenuItemSpec>>) -
         e.menu = Some(menu);
         Ok(())
     }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    // Linux/BSD: a GTK menu bar packed into tao's default vbox, above the webview.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use tao::platform::unix::WindowExtUnix;
+        let gtk_window = e.window.gtk_window();
+        if let Some(old) = e.menu.take() {
+            let _ = old.remove_for_gtk_window(gtk_window);
+        }
+        let Some(specs) = specs else { return Ok(()) };
+        let menu = native::build_menu(Owner::Window(id), &specs)?;
+        menu.init_for_gtk_window(gtk_window, e.window.default_vbox()).map_err(|e| e.to_string())?;
+        e.menu = Some(menu);
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
     {
         let _ = (e, id, specs);
-        Err("menu bars are only supported on Windows and macOS so far".into())
+        Err("menu bars are not supported on this platform".into())
     }
 }
 
@@ -1170,10 +1184,20 @@ fn popup_menu(e: &mut Entry, id: WindowId, specs: &[MenuItemSpec], at: Option<(f
         e.popup = Some(menu);
         Ok(())
     }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use gtk::prelude::Cast as _;
+        use muda::ContextMenu as _;
+        use tao::platform::unix::WindowExtUnix;
+        let pos = at.map(|(x, y)| muda::dpi::Position::Logical(muda::dpi::LogicalPosition::new(x, y)));
+        menu.show_context_menu_for_gtk_window(e.window.gtk_window().upcast_ref(), pos);
+        e.popup = Some(menu);
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
     {
         let _ = (e, at, menu);
-        Err("context menus are only supported on Windows and macOS so far".into())
+        Err("context menus are not supported on this platform".into())
     }
 }
 

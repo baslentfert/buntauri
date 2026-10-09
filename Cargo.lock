@@ -277,6 +277,7 @@ dependencies = [
  "arboard",
  "base64 0.23.1",
  "global-hotkey",
+ "gtk",
  "muda",
  "notify-rust",
  "objc2-app-kit",
