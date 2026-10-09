@@ -6,7 +6,8 @@ description = "Native window layer for buntauri: tao + wry on a dedicated UI thr
 license = "MIT"
 
 [dependencies]
-tao = "0.37"
+# No "dbus" default feature: on Linux it would make bun link libdbus (tao uses it only to follow the system theme).
+tao = { version = "0.37", default-features = false, features = ["rwh_06", "x11"] }
 wry = { version = "0.57", features = ["devtools"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

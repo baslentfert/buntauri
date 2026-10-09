@@ -33,7 +33,8 @@ export function buntauriLinkLibs(cfg: Config): string[] {
           (r.stderr ?? ""),
       );
     }
-    return r.stdout.trim().split(/\s+/).filter(Boolean);
+    // All undefined symbols at once, not just the first 20.
+    return [...r.stdout.trim().split(/\s+/).filter(Boolean), "-Wl,--error-limit=0"];
   }
   return [];
 }
