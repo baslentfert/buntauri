@@ -7,7 +7,7 @@
 // scripts) never reach the link. Static ones are bundled into the rlibs, which
 // is why Windows needs nothing here. This list fills the gap per OS.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { Config } from "./config.ts";
 
@@ -43,6 +43,13 @@ export function buntauriLinkLibs(cfg: Config): string[] {
 
 /** Libraries every Linux system has; linked as usual. */
 const SYSTEM_LIBS = new Set(["c", "m", "dl", "pthread", "rt"]);
+
+/**
+ * Libraries bun already links statically: neither link nor stub them (a stub
+ * defines all their symbols again: duplicates). GTK gets its own copy at run
+ * time through dlopen. Same rule for any library added later.
+ */
+const BUN_STATIC_LIBS = new Set(["z"]);
 
 /**
  * Linux: link GTK/WebKitGTK through lazy-loading stubs instead of `-l`.
@@ -95,6 +102,7 @@ void *buntauri_stub_dlopen(const char *lib) {
   for (const flag of flags) {
     // gmodule's pkg-config adds --export-dynamic; bun keeps its own export list.
     if (flag === "-Wl,--export-dynamic" || flag.startsWith("-L")) continue;
+    if (flag.startsWith("-l") && BUN_STATIC_LIBS.has(flag.slice(2))) continue;
     if (!flag.startsWith("-l") || SYSTEM_LIBS.has(flag.slice(2))) {
       out.push(flag);
       continue;
@@ -126,6 +134,8 @@ void *buntauri_stub_dlopen(const char *lib) {
         `generating the stub for ${file}`,
       );
       const objs = [compile(join(dir, `${basename(so)}.tramp.S`)), compile(join(dir, `${basename(so)}.init.c`))];
+      // `ar rcs` keeps members of an existing archive: start from scratch.
+      rmSync(archive, { force: true });
       run([cfg.ar, "rcs", archive, ...objs], `archiving the stub for ${file}`);
     }
     if (!out.includes(archive)) out.push(archive);
