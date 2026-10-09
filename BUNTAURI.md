@@ -100,6 +100,6 @@ What is left is the native shell around the window:
 - [ ] Code signing (Azure Artifact Signing, configurable per app)
 - [ ] Updater (maybe; single exe makes it simpler)
 - [ ] macOS (host subprocess), Linux
-- [ ] CI (GitHub Actions): build buntauri per platform, publish base executables; sign + notarize
+- [ ] CI (GitHub Actions): `build-macos.yml` (manual, macOS arm64) is the first step; build buntauri per platform, publish base executables; sign + notarize
       macOS (Developer ID Application, App Store Connect API key as secrets)
 - [ ] App manifest (comctl32 v6 + DPI awareness); then re-enable muda `common-controls-v6`

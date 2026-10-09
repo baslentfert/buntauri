@@ -1,0 +1,78 @@
+# Build Bun with buntauri on macOS (Apple Silicon).
+# Manual for now: Actions > "Build macOS" > Run workflow.
+name: Build macOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Bun build profile"
+        type: choice
+        options: [debug, release]
+        default: debug
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 360
+    steps:
+      - name: Disk space before
+        run: df -h /
+
+      - name: Free disk space
+        # Bun needs a lot of room; drop big preinstalled SDKs we don't use.
+        run: |
+          sudo rm -rf ~/Library/Android /usr/local/share/dotnet /usr/local/lib/node_modules \
+            /Library/Developer/CoreSimulator/Profiles/Runtimes || true
+          xcrun simctl delete all || true
+          df -h /
+
+      - uses: actions/checkout@v4
+        with:
+          path: buntauri
+
+      - name: Check out Bun at UPSTREAM
+        run: |
+          sha=$(head -n1 buntauri/UPSTREAM)
+          mkdir bun && cd bun
+          git init -q && git remote add origin https://github.com/oven-sh/bun.git
+          git fetch --depth 1 origin "$sha" && git checkout -q FETCH_HEAD
+          git log -1 --oneline
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Tooling
+        run: |
+          brew install automake ccache cmake coreutils gnu-sed go icu4c libiconv libtool ninja pkg-config ruby llvm@23
+          echo "$(brew --prefix llvm@23)/bin" >> "$GITHUB_PATH"
+          rustup --version
+
+      - name: Window crate tests
+        working-directory: buntauri
+        run: cargo test
+
+      - name: Apply buntauri to Bun
+        run: bun buntauri/scripts/sync.ts bun
+
+      - name: Build Bun (${{ inputs.profile }})
+        working-directory: bun
+        run: bun run build:${{ inputs.profile }}
+
+      - name: Disk space after
+        if: always()
+        run: df -h /
+
+      - name: Smoke test
+        working-directory: bun
+        run: |
+          exe=build/${{ inputs.profile }}/bun$([ "${{ inputs.profile }}" = debug ] && echo -debug)
+          "$exe" --revision
+          "$exe" -e 'const m = await import("bun:buntauri"); console.log("bun:buntauri exports:", Object.keys(m.default ?? m))'
+
+      - name: Upload Bun
+        uses: actions/upload-artifact@v4
+        with:
+          name: bun-buntauri-darwin-arm64-${{ inputs.profile }}
+          path: bun/build/${{ inputs.profile }}/bun*
+          if-no-files-found: warn
+          retention-days: 7
