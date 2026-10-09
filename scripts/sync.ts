@@ -160,7 +160,7 @@ const typeFixes: [string, string, string][] = [
 ];
 
 // 1. New files.
-cpSync(join(repo, "bun-glue"), bun, { recursive: true });
+cpSync(join(repo, "bun-glue"), bun, { recursive: true, filter: src => !src.endsWith("Cargo.lock") });
 console.log(`copied bun-glue/ -> ${bun}`);
 
 // 2. Anchored edits.
@@ -206,12 +206,45 @@ if (failed) {
 }
 console.log(changed ? `${changed} edit(s) applied.` : "Already in sync.");
 
-// Bun builds with `cargo --locked`: record our crates (and any new
-// dependencies of crates/window) in Bun's Cargo.lock. This only adds
-// entries; versions Bun already pins are left alone.
-const meta = Bun.spawnSync(["cargo", "metadata", "--format-version", "1"], { cwd: bun, stdout: "ignore", stderr: "pipe" });
-if (meta.exitCode !== 0) {
-  console.error(`cargo metadata failed:\n${meta.stderr.toString()}`);
+// Cargo.lock. Bun builds with `cargo --locked`, so its lockfile must list our
+// crates. The lock for the UPSTREAM revision is kept in this repo
+// (bun-glue/Cargo.lock): CI just uses it, no resolving needed (resolving needs
+// Bun's vendored path deps, which only Bun's build fetches).
+const upstream = readFileSync(join(repo, "UPSTREAM"), "utf8").split("\n")[0].trim();
+const head = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: bun }).stdout.toString().trim();
+const savedLock = join(repo, "bun-glue", "Cargo.lock");
+const bunLock = join(bun, "Cargo.lock");
+if (head === upstream && existsSync(savedLock)) {
+  writeFileSync(bunLock, readFileSync(savedLock));
+}
+
+// Where Bun's vendored deps are present (a checkout that has been built),
+// resolve for real: adds whatever crates/window needs, never changes versions
+// Bun already pins. Then save it back so it can be committed.
+const cargoToml = readFileSync(join(bun, "Cargo.toml"), "utf8");
+const vendored = [...cargoToml.matchAll(/path = "vendor\/([^"]+)"/g)].map(m => m[1]);
+const canResolve = vendored.every(dir => existsSync(join(bun, "vendor", dir, "Cargo.toml")));
+if (canResolve) {
+  const meta = Bun.spawnSync(["cargo", "metadata", "--format-version", "1"], { cwd: bun, stdout: "ignore", stderr: "pipe" });
+  if (meta.exitCode !== 0) {
+    console.error(`cargo metadata failed:\n${meta.stderr.toString()}`);
+    process.exit(1);
+  }
+  if (head === upstream) {
+    const lock = readFileSync(bunLock);
+    if (!existsSync(savedLock) || !lock.equals(readFileSync(savedLock))) {
+      writeFileSync(savedLock, lock);
+      console.log("Cargo.lock updated; commit bun-glue/Cargo.lock.");
+    } else console.log("Cargo.lock up to date.");
+  } else {
+    console.log(`Cargo.lock resolved for ${head.slice(0, 9)} (not UPSTREAM ${upstream.slice(0, 9)}; bun-glue/Cargo.lock left alone).`);
+  }
+} else if (head === upstream && existsSync(savedLock)) {
+  console.log("Cargo.lock taken from bun-glue/ (UPSTREAM revision).");
+} else {
+  console.error(
+    `Cannot update Cargo.lock: Bun is not at UPSTREAM (${upstream.slice(0, 9)}) and its vendored deps (${vendored.join(", ")}) are not fetched yet.\n` +
+      "Build Bun once without buntauri (or check out UPSTREAM), then run sync again.",
+  );
   process.exit(1);
 }
-console.log("Cargo.lock up to date.");

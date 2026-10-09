@@ -16,5 +16,10 @@ png = "0.18"
 base64 = "0.23"
 
 
+# Linux/BSD: menus need GTK 3, the tray needs libappindicator (both tray-icon/muda defaults there).
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+muda = { version = "0.21", default-features = false, features = ["gtk3"] }
+tray-icon = { version = "0.26", default-features = false, features = ["libappindicator"] }
+
 # Own lint policy; do not inherit the lints of a workspace this crate is built in (e.g. Bun).
 [lints]

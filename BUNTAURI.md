@@ -47,7 +47,8 @@ buntauri/
 
 1. Check out the new Bun revision and update `UPSTREAM`.
 2. `bun scripts/sync.ts [path/to/bun]`. If an anchor is not found, fix only that anchor.
-   It also adds our crates to Bun's `Cargo.lock` (Bun builds with `--locked`).
+   It also handles Bun's `Cargo.lock` (Bun builds with `--locked`): for the UPSTREAM revision the
+   lock is kept in `bun-glue/Cargo.lock`; after updating UPSTREAM, build Bun once, run sync, commit it.
 3. `pwsh scripts/build-bun.ps1` (add `-Target build:release` for a release build).
 4. Run the selftest. A new E0283 error (`as _` ambiguous)? Add a line to `typeFixes` in `sync.ts`.
 
