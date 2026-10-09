@@ -31,11 +31,17 @@ fn main() {
     let selftest = std::env::var_os("BUNTAURI_SELFTEST").is_some();
     // With ?selftest the page runs the round-trip test itself and reports via invoke("done").
     let url = if selftest { "index.html?selftest" } else { "index.html" };
-    ui.create_window(WindowOptions { title: "buntauri demo".into(), width: 640.0, height: 480.0, url: Some(url.into()), ..Default::default() });
+    // Same shape as a window in tauri.conf.json; Bun JS will send exactly this.
+    let opts = serde_json::json!({
+        "label": "main", "title": "buntauri demo", "url": url,
+        "width": 640, "height": 480, "minWidth": 400, "minHeight": 300,
+        "center": true, "theme": "dark", "backgroundColor": "#111111",
+    });
+    ui.create_window_json(&opts.to_string()).expect("window options");
     open += 1;
     if selftest {
         // A page outside app:// must NOT be able to invoke.
-        let w = ui.create_window(WindowOptions { title: "untrusted".into(), url: Some("data:text/html,<p>untrusted</p>".into()), ..Default::default() });
+        let w = ui.create_window(WindowOptions { label: "untrusted".into(), title: "untrusted".into(), url: Some("data:text/html,<p>untrusted</p>".into()), ..Default::default() });
         ui.eval(w, "window.__BUNTAURI__.invoke('greet', {name: 'evil'})");
         open += 1;
     }
@@ -45,8 +51,9 @@ fn main() {
     for ev in rx {
         match ev {
             HostEvent::Created { window } => println!("[host] window {window} created"),
-            HostEvent::Invoke { window, call, cmd, args } => {
-                println!("[host] invoke #{call} {cmd}({args}) from window {window}");
+            HostEvent::Invoke { window, call, cmd, args, origin, remote } => {
+                let how = if remote { ", remote" } else { "" };
+                println!("[host] invoke #{call} {cmd}({args}) from window {window} ({origin}{how})");
                 match cmd.as_str() {
                     "greet" => {
                         let args: serde_json::Value = serde_json::from_str(&args).unwrap();
@@ -75,6 +82,8 @@ fn main() {
                     other => ui.reject(window, call, &format!("unknown command: {other}")),
                 }
             }
+            HostEvent::DragDrop { window, kind, paths, x, y } => println!("[host] drag {kind} {paths:?} at {x},{y} in window {window}"),
+            HostEvent::Warning { window, message } => eprintln!("[host] warning (window {window:?}): {message}"),
             HostEvent::Closed { window } => {
                 println!("[host] window {window} closed");
                 open -= 1;

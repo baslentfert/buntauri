@@ -15,7 +15,20 @@ BUNTAURI_SELFTEST=1 cargo run --example demo  # automated round-trip test
 ```
 
 The demo's main thread stands in for Bun's JS thread; tao + wry run on a separate UI thread.
-Pages are served from `app://` (no port) and talk to the host with the snippet below. Only pages from `app://` (or inline HTML set by the host) may call `invoke`; remote pages are blocked unless `allow_remote_ipc` is set.
+Pages are served from `app://` (no port) and talk to the host with the snippet below. Only pages from `app://` (or inline HTML set by the host) may call `invoke`; remote pages are blocked unless the host allows them, like Tauri's capability `remote.urls`:
+
+```rust
+WindowOptions {
+    url: Some("https://example.com".into()),
+    ipc: IpcPolicy {
+        remote: vec!["https://example.com".into(), "https://*.example.com".into()],
+        remote_commands: Some(vec!["greet".into()]), // None = all commands
+    },
+    ..Default::default()
+}
+```
+
+The policy is set by the host, never by the page. Each `Invoke` event carries the page `origin` and a `remote` flag, so the host can also decide per command.
 
 
 ```js
@@ -23,6 +36,10 @@ const { invoke, listen } = window.__BUNTAURI__;
 await invoke("greet", { name: "world" });
 listen("tick", (n) => console.log(n));
 ```
+
+## Window options
+
+Same names and defaults as Tauri's `WindowConfig` (`tauri.conf.json`), so a Tauri window entry can be passed as-is. See [docs/window-options.md](docs/window-options.md).
 
 ## Design
 

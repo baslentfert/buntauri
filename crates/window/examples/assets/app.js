@@ -15,7 +15,7 @@ log(`geladen vanaf ${location.href}`);
 
 if (new URLSearchParams(location.search).has("selftest")) {
   (async () => {
-    const r = { href: location.href };
+    const r = { href: location.href, size: [innerWidth, innerHeight], dark: matchMedia("(prefers-color-scheme: dark)").matches };
     const ticks = [];
     listen("tick", (n) => ticks.push(n));
     r.greet = await invoke("greet", { name: "selftest" });

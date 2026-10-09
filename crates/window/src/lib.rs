@@ -13,13 +13,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 
-use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget};
 use tao::platform::run_return::EventLoopExtRunReturn;
-use tao::window::{Window, WindowBuilder};
+use tao::window::Window;
 use wry::http::{header::CONTENT_TYPE, Request, Response};
-use wry::{WebView, WebViewBuilder};
+use wry::{DragDropEvent, WebContext, WebView, WebViewBuilder};
+
+mod options;
+pub use options::{BackgroundThrottling, Color, IpcPolicy, PreventOverflow, ScrollBarStyle, Theme, WindowOptions};
 
 pub type WindowId = u32;
 
@@ -31,35 +33,6 @@ pub const ASSET_ROOT: &str = "app://localhost/";
 /// JS injected into every page before any page script runs.
 const BRIDGE_JS: &str = include_str!("bridge.js");
 
-#[derive(Debug, Clone)]
-pub struct WindowOptions {
-    pub title: String,
-    pub width: f64,
-    pub height: f64,
-    /// URL to load. Relative paths are resolved against [`ASSET_ROOT`].
-    pub url: Option<String>,
-    /// Inline HTML, used when `url` is `None`.
-    pub html: Option<String>,
-    pub devtools: bool,
-    /// Let pages outside `app://` (remote sites) call `invoke`. Off by default:
-    /// any page that can invoke can run host code.
-    pub allow_remote_ipc: bool,
-}
-
-impl Default for WindowOptions {
-    fn default() -> Self {
-        Self {
-            title: "buntauri".into(),
-            width: 800.0,
-            height: 600.0,
-            url: None,
-            html: None,
-            devtools: cfg!(debug_assertions),
-            allow_remote_ipc: false,
-        }
-    }
-}
-
 /// Events sent from the UI thread to the host.
 #[derive(Debug)]
 pub enum HostEvent {
@@ -67,10 +40,17 @@ pub enum HostEvent {
     Created { window: WindowId },
     /// The page called `window.__BUNTAURI__.invoke(cmd, args)`.
     /// Answer with [`UiThread::resolve`] / [`UiThread::reject`].
-    Invoke { window: WindowId, call: u64, cmd: String, args: String },
+    /// `origin` is the calling page's URL; `remote` is true when it was let in
+    /// by [`IpcPolicy::remote`] rather than being an `app://` page.
+    Invoke { window: WindowId, call: u64, cmd: String, args: String, origin: String, remote: bool },
+    /// Native file drag & drop (`dragDropEnabled`). `kind` is `enter`, `over`,
+    /// `drop` or `leave`; position is in physical pixels relative to the webview.
+    DragDrop { window: WindowId, kind: &'static str, paths: Vec<String>, x: i32, y: i32 },
     /// The user asked to close the window. It is already destroyed.
     Closed { window: WindowId },
     Error { window: Option<WindowId>, message: String },
+    /// Something was ignored, e.g. an unknown or unsupported window option.
+    Warning { window: Option<WindowId>, message: String },
     /// The UI thread's event loop has stopped.
     Exited,
 }
@@ -123,6 +103,11 @@ impl UiThread {
         id
     }
 
+    /// Create a window from JSON options (Tauri `WindowConfig` names), as sent by Bun JS.
+    pub fn create_window_json(&self, json: &str) -> Result<WindowId, String> {
+        Ok(self.create_window(WindowOptions::from_json(json)?))
+    }
+
     pub fn eval(&self, window: WindowId, js: impl Into<String>) {
         self.send(Command::Eval(window, js.into()));
     }
@@ -169,9 +154,12 @@ impl UiThread {
 type Emit = Arc<dyn Fn(HostEvent) + Send + Sync>;
 
 struct Entry {
-    // Field order matters: the webview must drop before its window.
+    label: String,
+    // Field order matters: the webview drops before its window, and both
+    // before the web context that holds the data directory.
     webview: WebView,
     window: Window,
+    _context: Option<Box<WebContext>>,
 }
 
 fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc<dyn AssetProvider>) {
@@ -200,7 +188,7 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
         *control_flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(cmd) => match cmd {
-                Command::Create(id, opts) => match create(target, id, opts, &emit, &assets) {
+                Command::Create(id, opts) => match create(target, id, opts, &windows, &emit, &assets) {
                     Ok(entry) => {
                         by_native.insert(entry.window.id(), id);
                         windows.insert(id, entry);
@@ -249,33 +237,80 @@ fn create(
     target: &EventLoopWindowTarget<Command>,
     id: WindowId,
     opts: WindowOptions,
+    windows: &HashMap<WindowId, Entry>,
     emit: &Emit,
     assets: &Arc<dyn AssetProvider>,
 ) -> Result<Entry, String> {
-    let window = WindowBuilder::new()
-        .with_title(&opts.title)
-        .with_inner_size(LogicalSize::new(opts.width, opts.height))
-        .build(target)
-        .map_err(|e| e.to_string())?;
+    if windows.values().any(|e| e.label == opts.label) {
+        return Err(format!("a window with label {:?} already exists", opts.label));
+    }
+    for message in opts.warnings() {
+        emit(HostEvent::Warning { window: Some(id), message });
+    }
+
+    #[allow(unused_mut)]
+    let mut wb = opts.window_builder();
+    if let Some(parent) = &opts.parent {
+        let owner = windows
+            .values()
+            .find(|e| &e.label == parent)
+            .ok_or_else(|| format!("parent window {parent:?} not found"))?;
+        #[cfg(target_os = "windows")]
+        {
+            use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
+            wb = wb.with_owner_window(owner.window.hwnd());
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = owner;
+            emit(HostEvent::Warning { window: Some(id), message: "window option \"parent\" is not supported on this platform yet".into() });
+        }
+    }
+    let window = wb.build(target).map_err(|e| e.to_string())?;
+
+    let mut context = opts.data_directory.clone().map(|dir| Box::new(WebContext::new(Some(dir))));
+    let mut builder = match context.as_deref_mut() {
+        Some(ctx) => WebViewBuilder::new_with_web_context(ctx),
+        None => WebViewBuilder::new(),
+    };
+    builder = opts.apply_webview(builder)?;
 
     let ipc_emit = emit.clone();
     // Inline HTML comes from the host itself, so it is trusted like app://.
     let trust_inline = opts.url.is_none() && opts.html.is_some();
+    let policy = opts.ipc.clone();
     let assets = assets.clone();
-    let mut builder = WebViewBuilder::new()
-        .with_devtools(opts.devtools)
+    builder = builder
         .with_initialization_script(BRIDGE_JS)
         .with_custom_protocol(ASSET_SCHEME.into(), move |_, req| serve_asset(&*assets, &req))
         .with_ipc_handler(move |req: Request<String>| {
-            if allow_ipc(req.uri(), trust_inline, opts.allow_remote_ipc) {
-                on_ipc(id, req.body(), &ipc_emit);
-            } else {
-                ipc_emit(HostEvent::Error { window: Some(id), message: format!("ipc blocked from {}", req.uri()) });
+            let origin = req.uri().to_string();
+            match ipc_access(req.uri(), trust_inline, &policy) {
+                Access::Local => on_ipc(id, req.body(), &origin, false, None, &ipc_emit),
+                Access::Remote => on_ipc(id, req.body(), &origin, true, policy.remote_commands.as_deref(), &ipc_emit),
+                Access::Denied => ipc_emit(HostEvent::Error { window: Some(id), message: format!("ipc blocked from {origin}") }),
             }
         });
 
-    builder = match (opts.url, opts.html) {
-        (Some(url), _) => builder.with_url(resolve_url(&url)),
+    if opts.drag_drop_enabled {
+        let dd_emit = emit.clone();
+        builder = builder.with_drag_drop_handler(move |ev| {
+            let paths = |p: Vec<std::path::PathBuf>| p.into_iter().map(|p| p.to_string_lossy().into_owned()).collect();
+            let (kind, paths, (x, y)) = match ev {
+                DragDropEvent::Enter { paths: p, position } => ("enter", paths(p), position),
+                DragDropEvent::Over { position } => ("over", Vec::new(), position),
+                DragDropEvent::Drop { paths: p, position } => ("drop", paths(p), position),
+                DragDropEvent::Leave => ("leave", Vec::new(), (0, 0)),
+                _ => return false,
+            };
+            dd_emit(HostEvent::DragDrop { window: id, kind, paths, x, y });
+            // Block the OS default (the webview opening the file).
+            true
+        });
+    }
+
+    builder = match (&opts.url, &opts.html) {
+        (Some(url), _) => builder.with_url(resolve_url(url)),
         (None, Some(html)) => builder.with_html(html),
         (None, None) => builder.with_url(ASSET_ROOT),
     };
@@ -288,8 +323,10 @@ fn create(
         use wry::WebViewBuilderExtUnix;
         builder.build_gtk(window.default_vbox().unwrap())
     };
+    let webview = webview.map_err(|e| e.to_string())?;
 
-    Ok(Entry { webview: webview.map_err(|e| e.to_string())?, window })
+    opts.place(&window);
+    Ok(Entry { label: opts.label, webview, window, _context: context })
 }
 
 fn resolve_url(url: &str) -> String {
@@ -320,22 +357,78 @@ fn serve_asset(assets: &dyn AssetProvider, req: &Request<Vec<u8>>) -> Response<C
     }
 }
 
-/// IPC is only accepted from pages served by our own asset protocol
-/// (`app://localhost`, or `http(s)://app.localhost` on Windows/Android).
-fn allow_ipc(uri: &wry::http::Uri, trust_inline: bool, allow_remote: bool) -> bool {
-    if allow_remote {
-        return true;
-    }
+enum Access {
+    Local,
+    Remote,
+    Denied,
+}
+
+/// Our own pages (`app://localhost`, or `http(s)://app.localhost` on
+/// Windows/Android) are local. Anything else needs a matching remote pattern.
+fn ipc_access(uri: &wry::http::Uri, trust_inline: bool, policy: &IpcPolicy) -> Access {
     let host = uri.host().unwrap_or("");
-    match uri.scheme_str() {
+    let local = match uri.scheme_str() {
         Some(s) if s == ASSET_SCHEME => host == "localhost",
         Some("http") | Some("https") => host == format!("{ASSET_SCHEME}.localhost"),
         // about:blank / data: for inline HTML set by the host.
         _ => trust_inline,
+    };
+    if local {
+        Access::Local
+    } else if policy.remote.iter().any(|p| url_matches(p, uri)) {
+        Access::Remote
+    } else {
+        Access::Denied
     }
 }
 
-fn on_ipc(window: WindowId, body: &str, emit: &Emit) {
+/// Match a URL against a pattern like `https://*.example.com/app/*`.
+/// Scheme and port must match exactly. A host has no `/`, so a `*` in the
+/// host pattern can't reach into the path (`https://*.a.nl` won't match
+/// `https://evil.com/.a.nl`).
+fn url_matches(pattern: &str, uri: &wry::http::Uri) -> bool {
+    let Some((scheme, rest)) = pattern.split_once("://") else { return false };
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/*"),
+    };
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) => match p.parse::<u16>() {
+            Ok(p) => (h, Some(p)),
+            Err(_) => return false,
+        },
+        None => (authority, None),
+    };
+    uri.scheme_str() == Some(scheme)
+        && uri.port_u16() == port
+        && glob(&host.to_ascii_lowercase(), &uri.host().unwrap_or("").to_ascii_lowercase())
+        && glob(path, uri.path())
+}
+
+/// `*` matches any run of characters, including none.
+fn glob(pattern: &str, text: &str) -> bool {
+    let (p, t) = (pattern.as_bytes(), text.as_bytes());
+    let (mut pi, mut ti, mut star, mut mark) = (0, 0, None, 0);
+    while ti < t.len() {
+        if pi < p.len() && p[pi] == b'*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if pi < p.len() && p[pi] == t[ti] {
+            pi += 1;
+            ti += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|&c| c == b'*')
+}
+
+fn on_ipc(window: WindowId, body: &str, origin: &str, remote: bool, allowed: Option<&[String]>, emit: &Emit) {
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(body);
     let msg = match parsed {
         Ok(serde_json::Value::Object(m)) => m,
@@ -347,12 +440,20 @@ fn on_ipc(window: WindowId, body: &str, emit: &Emit) {
     let call = msg.get("id").and_then(|v| v.as_u64());
     let cmd = msg.get("cmd").and_then(|v| v.as_str());
     match (call, cmd) {
-        (Some(call), Some(cmd)) => emit(HostEvent::Invoke {
-            window,
-            call,
-            cmd: cmd.to_string(),
-            args: msg.get("args").map(|a| a.to_string()).unwrap_or_else(|| "null".into()),
-        }),
+        (Some(call), Some(cmd)) => {
+            if allowed.is_some_and(|list| !list.iter().any(|c| c == cmd)) {
+                emit(HostEvent::Error { window: Some(window), message: format!("ipc command {cmd:?} not allowed from {origin}") });
+                return;
+            }
+            emit(HostEvent::Invoke {
+                window,
+                call,
+                cmd: cmd.to_string(),
+                args: msg.get("args").map(|a| a.to_string()).unwrap_or_else(|| "null".into()),
+                origin: origin.to_string(),
+                remote,
+            })
+        }
         _ => emit(HostEvent::Error { window: Some(window), message: format!("bad ipc message: {body}") }),
     }
 }
@@ -375,5 +476,44 @@ pub fn mime_for(path: &str) -> &'static str {
         "wasm" => "application/wasm",
         "txt" => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn m(pattern: &str, url: &str) -> bool {
+        url_matches(pattern, &url.parse().unwrap())
+    }
+
+    #[test]
+    fn remote_patterns() {
+        assert!(m("https://example.com", "https://example.com/"));
+        assert!(m("https://example.com", "https://example.com/deep/page?q=1"));
+        assert!(m("https://*.example.com", "https://app.example.com/x"));
+        assert!(!m("https://*.example.com", "https://example.com/"));
+        assert!(!m("https://*.example.com", "https://evil.com/.example.com"));
+        assert!(!m("https://*.example.com", "https://example.com.evil.com/"));
+        assert!(!m("https://example.com", "http://example.com/"));
+        assert!(!m("https://example.com", "https://example.com:8443/"));
+        assert!(m("https://example.com:8443", "https://example.com:8443/"));
+        assert!(m("https://example.com/app/*", "https://example.com/app/x"));
+        assert!(!m("https://example.com/app/*", "https://example.com/other"));
+        assert!(m("http://localhost:5173", "http://localhost:5173/"));
+        assert!(m("https://EXAMPLE.com", "https://example.COM/"));
+        assert!(!m("https://example.com:abc", "https://example.com/"));
+    }
+
+    #[test]
+    fn local_remote_denied() {
+        let u = |s: &str| s.parse::<wry::http::Uri>().unwrap();
+        let none = IpcPolicy::default();
+        assert!(matches!(ipc_access(&u("http://app.localhost/"), false, &none), Access::Local));
+        assert!(matches!(ipc_access(&u("app://localhost/x"), false, &none), Access::Local));
+        assert!(matches!(ipc_access(&u("https://example.com/"), false, &none), Access::Denied));
+        assert!(matches!(ipc_access(&u("http://app.localhost.evil.com/"), false, &none), Access::Denied));
+        let p = IpcPolicy { remote: vec!["https://example.com".into()], remote_commands: None };
+        assert!(matches!(ipc_access(&u("https://example.com/"), false, &p), Access::Remote));
     }
 }
