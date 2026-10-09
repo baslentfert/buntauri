@@ -100,7 +100,11 @@ What is left is the native shell around the window:
 - [ ] `buntauri build`: one command for compile + icon + manifest (DPI awareness) + signing
 - [ ] Code signing (Azure Artifact Signing, configurable per app)
 - [ ] Updater (maybe; single exe makes it simpler)
-- [ ] macOS (host subprocess), Linux
+- [ ] macOS: Bun + buntauri **builds, links and starts** in CI (macOS 14, Apple Silicon, release;
+      `bun:buntauri` loads). Windows cannot open yet: AppKit needs the process main thread, so the
+      UI host subprocess comes next (mac-buntauri, branch `macos`). Every bun start on macOS loads
+      AppKit/WebKit (no delay-load on macOS); revisit with the UI host design.
+- [ ] Linux: builds in CI up to the final link; link still fails (being diagnosed).
 - [ ] CI (GitHub Actions): `build-macos.yml` (manual, macOS arm64) is the first step; build buntauri per platform, publish base executables; sign + notarize
       macOS (Developer ID Application, App Store Connect API key as secrets)
 - [ ] App manifest (comctl32 v6 + DPI awareness); then re-enable muda `common-controls-v6`
