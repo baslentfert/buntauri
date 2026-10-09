@@ -94,6 +94,10 @@ pub struct WindowOptions {
 
     /// buntauri extra: who may call `invoke` besides `app://` pages.
     pub ipc: IpcPolicy,
+    /// buntauri extra: window icon, a base64 PNG (or data: URL).
+    pub icon: Option<String>,
+    /// buntauri extra: menu bar (see `MenuItemSpec`).
+    pub menu: Option<Vec<crate::MenuItemSpec>>,
 
     /// Everything else (unknown keys and options not applied on this platform).
     #[serde(flatten)]
@@ -154,6 +158,8 @@ impl Default for WindowOptions {
             scroll_bar_style: ScrollBarStyle::Default,
             general_autofill_enabled: true,
             ipc: IpcPolicy::default(),
+            icon: None,
+            menu: None,
             other: serde_json::Map::new(),
         }
     }

@@ -20,8 +20,16 @@ use tao::window::Window;
 use wry::http::{header::CONTENT_TYPE, Request, Response};
 use wry::{DragDropEvent, WebContext, WebView, WebViewBuilder};
 
+mod native;
 mod options;
+pub use native::{decode_base64, decode_png, MenuItemSpec, Owner, TraySpec};
 pub use options::{BackgroundThrottling, Color, IpcPolicy, PreventOverflow, ScrollBarStyle, Theme, WindowOptions};
+
+/// Id of a tray icon. Shares the id space with windows.
+pub type TrayId = u32;
+
+/// Straight RGBA8 pixels: (pixels, width, height).
+type Rgba = (Vec<u8>, u32, u32);
 
 pub type WindowId = u32;
 
@@ -53,6 +61,14 @@ pub enum HostEvent {
     Error { window: Option<WindowId>, message: String },
     /// Something was ignored, e.g. an unknown or unsupported window option.
     Warning { window: Option<WindowId>, message: String },
+    /// A menu item was clicked: from a window's menu bar / context menu
+    /// (`window`) or from a tray menu (`tray`). `id` is the item's own id.
+    Menu { window: Option<WindowId>, tray: Option<TrayId>, id: String },
+    /// A tray icon was clicked. `kind`: `click` or `doubleclick`;
+    /// `button`: `left`, `right` or `middle`; position in physical pixels.
+    Tray { tray: TrayId, kind: &'static str, button: &'static str, x: f64, y: f64 },
+    /// The tray icon could not be created.
+    TrayFailed { tray: TrayId, message: String },
     /// The UI thread's event loop has stopped.
     Exited,
 }
@@ -66,9 +82,24 @@ impl HostEvent {
             | HostEvent::DragDrop { window, .. }
             | HostEvent::Closed { window }
             | HostEvent::CreateFailed { window, .. } => Some(*window),
-            HostEvent::Error { window, .. } | HostEvent::Warning { window, .. } => *window,
-            HostEvent::Exited => None,
+            HostEvent::Error { window, .. } | HostEvent::Warning { window, .. } | HostEvent::Menu { window, .. } => *window,
+            HostEvent::Tray { .. } | HostEvent::TrayFailed { .. } | HostEvent::Exited => None,
         }
+    }
+
+    /// The window or tray this event is about. Windows and trays share one
+    /// id space, so a host can keep a single "alive" set for both.
+    pub fn owner(&self) -> Option<u32> {
+        match self {
+            HostEvent::Tray { tray, .. } | HostEvent::TrayFailed { tray, .. } => Some(*tray),
+            HostEvent::Menu { window, tray, .. } => window.or(*tray),
+            _ => self.window(),
+        }
+    }
+
+    /// The window or tray is gone after this event (closed or never created).
+    pub fn ends_owner(&self) -> bool {
+        matches!(self, HostEvent::Closed { .. } | HostEvent::CreateFailed { .. } | HostEvent::TrayFailed { .. })
     }
 
     /// JSON for a JS host: `{"type": "invoke", "window": 1, ...}`.
@@ -89,6 +120,11 @@ impl HostEvent {
             HostEvent::CreateFailed { window, message } => json!({ "type": "createfailed", "window": window, "message": message }),
             HostEvent::Error { window, message } => json!({ "type": "error", "window": window, "message": message }),
             HostEvent::Warning { window, message } => json!({ "type": "warning", "window": window, "message": message }),
+            HostEvent::Menu { window, tray, id } => json!({ "type": "menu", "window": window, "tray": tray, "id": id }),
+            HostEvent::Tray { tray, kind, button, x, y } => {
+                json!({ "type": "tray", "tray": tray, "kind": kind, "button": button, "x": x, "y": y })
+            }
+            HostEvent::TrayFailed { tray, message } => json!({ "type": "trayfailed", "tray": tray, "message": message }),
             HostEvent::Exited => json!({ "type": "exited" }),
         };
         v.to_string()
@@ -136,6 +172,12 @@ enum Command {
     Eval(WindowId, String),
     SetTitle(WindowId, String),
     Close(WindowId),
+    SetIcon(WindowId, Rgba),
+    SetMenu(WindowId, Option<Vec<MenuItemSpec>>),
+    Popup(WindowId, Vec<MenuItemSpec>, Option<(f64, f64)>),
+    TrayCreate(TrayId, TraySpec, Option<Rgba>),
+    TrayUpdate(TrayId, TraySpec, Option<Rgba>),
+    TrayRemove(TrayId),
     Shutdown,
 }
 
@@ -184,6 +226,50 @@ impl UiThread {
         self.send(Command::Close(window));
     }
 
+    /// Window icon (title bar + taskbar) from a base64 PNG.
+    pub fn set_icon_base64(&self, window: WindowId, png_base64: &str) -> Result<(), String> {
+        let rgba = decode_png(&decode_base64(png_base64)?)?;
+        self.send(Command::SetIcon(window, rgba));
+        Ok(())
+    }
+
+    /// Menu bar from a JSON array of [`MenuItemSpec`]; `null` removes it.
+    pub fn set_menu_json(&self, window: WindowId, json: &str) -> Result<(), String> {
+        let specs: Option<Vec<MenuItemSpec>> = serde_json::from_str(json).map_err(|e| format!("invalid menu: {e}"))?;
+        self.send(Command::SetMenu(window, specs));
+        Ok(())
+    }
+
+    /// Show a context menu at a logical position in the window (or at the cursor).
+    pub fn popup_menu_json(&self, window: WindowId, json: &str, at: Option<(f64, f64)>) -> Result<(), String> {
+        let specs: Vec<MenuItemSpec> = serde_json::from_str(json).map_err(|e| format!("invalid menu: {e}"))?;
+        self.send(Command::Popup(window, specs, at));
+        Ok(())
+    }
+
+    /// Create a tray icon from a JSON [`TraySpec`]. The icon PNG is decoded
+    /// here, so a bad icon is an error right away.
+    pub fn create_tray_json(&self, json: &str) -> Result<TrayId, String> {
+        let (spec, icon) = parse_tray(json)?;
+        if icon.is_none() {
+            return Err("a tray needs an icon (base64 PNG)".into());
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.send(Command::TrayCreate(id, spec, icon));
+        Ok(id)
+    }
+
+    /// Change a tray: only the fields present in the JSON are applied.
+    pub fn update_tray_json(&self, tray: TrayId, json: &str) -> Result<(), String> {
+        let (spec, icon) = parse_tray(json)?;
+        self.send(Command::TrayUpdate(tray, spec, icon));
+        Ok(())
+    }
+
+    pub fn remove_tray(&self, tray: TrayId) {
+        self.send(Command::TrayRemove(tray));
+    }
+
     /// Fulfil an `invoke` call. `json` must be valid JSON.
     pub fn resolve(&self, window: WindowId, call: u64, json: &str) {
         self.eval(window, format!("window.__BUNTAURI__.__settle({call},true,{json})"));
@@ -217,8 +303,20 @@ impl UiThread {
 
 type Emit = Arc<dyn Fn(HostEvent) + Send + Sync>;
 
+fn parse_tray(json: &str) -> Result<(TraySpec, Option<Rgba>), String> {
+    let spec: TraySpec = serde_json::from_str(json).map_err(|e| format!("invalid tray: {e}"))?;
+    let icon = match &spec.icon {
+        Some(b64) => Some(decode_png(&decode_base64(b64)?)?),
+        None => None,
+    };
+    Ok((spec, icon))
+}
+
 struct Entry {
     label: String,
+    /// Menu bar and the last context menu; kept alive while the window lives.
+    menu: Option<muda::Menu>,
+    popup: Option<muda::Menu>,
     // Field order matters: the webview drops before its window, and both
     // before the web context that holds the data directory.
     webview: WebView,
@@ -238,6 +336,24 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
         use tao::platform::unix::EventLoopBuilderExtUnix;
         builder.with_any_thread(true);
     }
+    // Windows: menu accelerators (Ctrl+S, ...) only fire when the message
+    // loop translates them, as Tauri does. Menus register their table here.
+    #[cfg(target_os = "windows")]
+    let accels: std::rc::Rc<std::cell::RefCell<HashMap<WindowId, isize>>> = Default::default();
+    #[cfg(target_os = "windows")]
+    {
+        use tao::platform::windows::EventLoopBuilderExtWindows;
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn TranslateAcceleratorW(hwnd: isize, haccel: isize, msg: *const core::ffi::c_void) -> i32;
+        }
+        let accels = accels.clone();
+        builder.with_msg_hook(move |msg| {
+            // MSG starts with its HWND.
+            let hwnd = unsafe { *(msg as *const isize) };
+            accels.borrow().values().any(|&h| unsafe { TranslateAcceleratorW(hwnd, h, msg) } == 1)
+        });
+    }
     // macOS: AppKit requires the process main thread, so this panics there.
     // buntauri will use a host subprocess on macOS (see BUNTAURI.md).
     let mut event_loop = builder.build();
@@ -247,6 +363,40 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
 
     let mut windows: HashMap<WindowId, Entry> = HashMap::new();
     let mut by_native: HashMap<tao::window::WindowId, WindowId> = HashMap::new();
+    let mut trays: HashMap<TrayId, tray_icon::TrayIcon> = HashMap::new();
+
+    // One global handler each (muda/tray-icon allow only one): route by the
+    // owner prefix in the menu id, and by tray id.
+    {
+        let emit = emit.clone();
+        muda::MenuEvent::set_event_handler(Some(move |e: muda::MenuEvent| {
+            if let Some((owner, id)) = Owner::parse(&e.id.0) {
+                let (window, tray) = match owner {
+                    Owner::Window(w) => (Some(w), None),
+                    Owner::Tray(t) => (None, Some(t)),
+                };
+                emit(HostEvent::Menu { window, tray, id });
+            }
+        }));
+    }
+    {
+        let emit = emit.clone();
+        tray_icon::TrayIconEvent::set_event_handler(Some(move |e: tray_icon::TrayIconEvent| {
+            use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent as T};
+            let (id, kind, button, pos) = match e {
+                T::Click { id, button, button_state: MouseButtonState::Up, position, .. } => (id, "click", button, position),
+                T::DoubleClick { id, button, position, .. } => (id, "doubleclick", button, position),
+                _ => return,
+            };
+            let Ok(tray) = id.0.parse::<TrayId>() else { return };
+            let button = match button {
+                MouseButton::Left => "left",
+                MouseButton::Right => "right",
+                MouseButton::Middle => "middle",
+            };
+            emit(HostEvent::Tray { tray, kind, button, x: pos.x, y: pos.y });
+        }));
+    }
 
     event_loop.run_return(|event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -275,10 +425,61 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
                 Command::Close(id) => {
                     if let Some(e) = windows.remove(&id) {
                         by_native.remove(&e.window.id());
+                        #[cfg(target_os = "windows")]
+                        accels.borrow_mut().remove(&id);
                         emit(HostEvent::Closed { window: id });
                     }
                 }
+                Command::SetIcon(id, (rgba, w, h)) => {
+                    if let Some(e) = windows.get(&id) {
+                        match tao::window::Icon::from_rgba(rgba, w, h) {
+                            Ok(icon) => e.window.set_window_icon(Some(icon)),
+                            Err(err) => emit(HostEvent::Error { window: Some(id), message: format!("bad icon: {err}") }),
+                        }
+                    }
+                }
+                Command::SetMenu(id, specs) => {
+                    if let Some(e) = windows.get_mut(&id) {
+                        let result = set_menu_bar(e, id, specs);
+                        #[cfg(target_os = "windows")]
+                        match &e.menu {
+                            Some(m) => {
+                                accels.borrow_mut().insert(id, m.haccel());
+                            }
+                            None => {
+                                accels.borrow_mut().remove(&id);
+                            }
+                        }
+                        if let Err(message) = result {
+                            emit(HostEvent::Error { window: Some(id), message });
+                        }
+                    }
+                }
+                Command::Popup(id, specs, at) => {
+                    if let Some(e) = windows.get_mut(&id) {
+                        if let Err(message) = popup_menu(e, id, &specs, at) {
+                            emit(HostEvent::Error { window: Some(id), message });
+                        }
+                    }
+                }
+                Command::TrayCreate(id, spec, icon) => match create_tray(id, &spec, icon) {
+                    Ok(t) => {
+                        trays.insert(id, t);
+                    }
+                    Err(message) => emit(HostEvent::TrayFailed { tray: id, message }),
+                },
+                Command::TrayUpdate(id, spec, icon) => {
+                    if let Some(t) = trays.get(&id) {
+                        if let Err(message) = update_tray(t, id, &spec, icon) {
+                            emit(HostEvent::Error { window: None, message });
+                        }
+                    }
+                }
+                Command::TrayRemove(id) => {
+                    trays.remove(&id);
+                }
                 Command::Shutdown => {
+                    trays.clear();
                     windows.clear();
                     by_native.clear();
                     *control_flow = ControlFlow::Exit;
@@ -287,6 +488,8 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
             Event::WindowEvent { window_id, event: WindowEvent::CloseRequested, .. } => {
                 if let Some(id) = by_native.remove(&window_id) {
                     windows.remove(&id);
+                    #[cfg(target_os = "windows")]
+                    accels.borrow_mut().remove(&id);
                     emit(HostEvent::Closed { window: id });
                 }
             }
@@ -390,7 +593,106 @@ fn create(
     let webview = webview.map_err(|e| e.to_string())?;
 
     opts.place(&window);
-    Ok(Entry { label: opts.label, webview, window, _context: context })
+    let mut entry = Entry { label: opts.label.clone(), menu: None, popup: None, webview, window, _context: context };
+    if let Some(b64) = &opts.icon {
+        let (rgba, w, h) = decode_png(&decode_base64(b64)?)?;
+        let icon = tao::window::Icon::from_rgba(rgba, w, h).map_err(|e| format!("bad icon: {e}"))?;
+        entry.window.set_window_icon(Some(icon));
+    }
+    if opts.menu.is_some() {
+        set_menu_bar(&mut entry, id, opts.menu.clone())?;
+    }
+    Ok(entry)
+}
+
+/// Attach (or with `None`, remove) the window's menu bar.
+fn set_menu_bar(e: &mut Entry, id: WindowId, specs: Option<Vec<MenuItemSpec>>) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use tao::platform::windows::WindowExtWindows;
+        let hwnd = e.window.hwnd();
+        if let Some(old) = e.menu.take() {
+            // SAFETY: hwnd is this live window's handle.
+            let _ = unsafe { old.remove_for_hwnd(hwnd) };
+        }
+        let Some(specs) = specs else { return Ok(()) };
+        let menu = native::build_menu(Owner::Window(id), &specs)?;
+        // SAFETY: as above.
+        unsafe { menu.init_for_hwnd_with_theme(hwnd, muda::MenuTheme::Auto) }.map_err(|e| e.to_string())?;
+        e.menu = Some(menu);
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (e, id, specs);
+        Err("menu bars are only supported on Windows so far".into())
+    }
+}
+
+fn popup_menu(e: &mut Entry, id: WindowId, specs: &[MenuItemSpec], at: Option<(f64, f64)>) -> Result<(), String> {
+    let menu = native::build_menu(Owner::Window(id), specs)?;
+    #[cfg(target_os = "windows")]
+    {
+        use muda::ContextMenu as _;
+        use tao::platform::windows::WindowExtWindows;
+        let pos = at.map(|(x, y)| muda::dpi::Position::Logical(muda::dpi::LogicalPosition::new(x, y)));
+        // SAFETY: hwnd is this live window's handle.
+        unsafe { menu.show_context_menu_for_hwnd(e.window.hwnd(), pos) };
+        // Keep it alive until the next popup, so its click event is delivered.
+        e.popup = Some(menu);
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (e, at, menu);
+        Err("context menus are only supported on Windows so far".into())
+    }
+}
+
+fn tray_icon_from(rgba: Rgba) -> Result<tray_icon::Icon, String> {
+    tray_icon::Icon::from_rgba(rgba.0, rgba.1, rgba.2).map_err(|e| format!("bad tray icon: {e}"))
+}
+
+fn create_tray(id: TrayId, spec: &TraySpec, icon: Option<Rgba>) -> Result<tray_icon::TrayIcon, String> {
+    let mut b = tray_icon::TrayIconBuilder::new()
+        .with_id(id.to_string())
+        .with_menu_on_left_click(spec.menu_on_left_click);
+    if let Some(icon) = icon {
+        b = b.with_icon(tray_icon_from(icon)?);
+    }
+    if let Some(t) = &spec.tooltip {
+        b = b.with_tooltip(t);
+    }
+    if let Some(t) = &spec.title {
+        b = b.with_title(t);
+    }
+    if let Some(items) = &spec.menu {
+        b = b.with_menu(Box::new(native::build_menu(Owner::Tray(id), items)?));
+    }
+    let tray = b.build().map_err(|e| e.to_string())?;
+    if spec.visible == Some(false) {
+        tray.set_visible(false).map_err(|e| e.to_string())?;
+    }
+    Ok(tray)
+}
+
+fn update_tray(t: &tray_icon::TrayIcon, id: TrayId, spec: &TraySpec, icon: Option<Rgba>) -> Result<(), String> {
+    if let Some(icon) = icon {
+        t.set_icon(Some(tray_icon_from(icon)?)).map_err(|e| e.to_string())?;
+    }
+    if let Some(tip) = &spec.tooltip {
+        t.set_tooltip(Some(tip)).map_err(|e| e.to_string())?;
+    }
+    if let Some(title) = &spec.title {
+        t.set_title(Some(title));
+    }
+    if let Some(items) = &spec.menu {
+        t.set_menu(Some(Box::new(native::build_menu(Owner::Tray(id), items)?)));
+    }
+    if let Some(v) = spec.visible {
+        t.set_visible(v).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn resolve_url(url: &str) -> String {

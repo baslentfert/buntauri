@@ -47,6 +47,7 @@ buntauri/
 
 1. Check out the new Bun revision and update `UPSTREAM`.
 2. `bun scripts/sync.ts [path/to/bun]`. If an anchor is not found, fix only that anchor.
+   It also adds our crates to Bun's `Cargo.lock` (Bun builds with `--locked`).
 3. `pwsh scripts/build-bun.ps1` (add `-Target build:release` for a release build).
 4. Run the selftest. A new E0283 error (`as _` ambiguous)? Add a line to `typeFixes` in `sync.ts`.
 
@@ -82,9 +83,9 @@ opening URLs/files (`Bun.spawn(["cmd", "/c", "start", "", url])`; note `Bun.$` h
 autostart (registry via `reg.exe`), clipboard *images* (`Bun.Image.fromClipboard`).
 What is left is the native shell around the window:
 
-- [ ] Window icon (tao)
-- [ ] Tray icon with menu and click events (`tray-icon` 0.26)
-- [ ] Menus: window menu bar and context menus (`muda` 0.21)
+- [x] Window icon (tao): `icon` option and `win.setIcon()`
+- [x] Tray icon with menu and click events (`tray-icon` 0.26): `new Tray({...})`
+- [x] Menus: window menu bar and context menus (`muda` 0.21), accelerators on Windows
 - [ ] Window control at runtime: minimize, maximize, show/hide, size, position, focus,
       always-on-top, fullscreen, plus resize/move/focus events (tao)
 - [ ] Native dialogs: open/save file, folder picker, message box (`rfd`)
@@ -99,3 +100,6 @@ What is left is the native shell around the window:
 - [ ] Code signing (Azure Artifact Signing, configurable per app)
 - [ ] Updater (maybe; single exe makes it simpler)
 - [ ] macOS (host subprocess), Linux
+- [ ] CI (GitHub Actions): build buntauri per platform, publish base executables; sign + notarize
+      macOS (Developer ID Application, App Store Connect API key as secrets)
+- [ ] App manifest (comctl32 v6 + DPI awareness); then re-enable muda `common-controls-v6`

@@ -19,8 +19,8 @@ use buntauri_window::{Asset, AssetProvider, DirAssets, HostEvent, NoAssets, UiTh
 struct State {
     ui: UiThread,
     callback: Strong,
-    /// Windows that keep the event loop alive (created, not yet closed).
-    alive: HashSet<WindowId>,
+    /// Windows and trays that keep the event loop alive (they share one id space).
+    alive: HashSet<u32>,
 }
 
 // JS-thread only (host functions and `deliver`).
@@ -93,9 +93,9 @@ fn asset_provider(dir: Option<String>) -> Arc<dyn AssetProvider> {
 
 /// An event from the UI thread, queued onto the JS thread.
 pub(crate) struct WindowEvent {
-    window: Option<WindowId>,
-    /// The window is gone (closed, or never created): release its keep-alive.
-    ends_window: bool,
+    owner: Option<u32>,
+    /// The window/tray is gone (closed, or never created): release its keep-alive.
+    ends_owner: bool,
     json: String,
 }
 
@@ -114,11 +114,9 @@ impl WindowEvent {
     #[allow(clippy::boxed_local, reason = "reclaim point for the boxed task")]
     pub(crate) fn deliver(self: Box<Self>, global: &JSGlobalObject) -> JsResult<()> {
         let Some(s) = state() else { return Ok(()) };
-        if self.ends_window {
-            if let Some(id) = self.window {
-                if s.alive.remove(&id) {
-                    global.bun_vm().event_loop_mut().unref_keep_alive();
-                }
+        if self.ends_owner {
+            if let Some(id) = self.owner {
+                release(global, s, id);
             }
         }
         let arg = create_utf8_for_js(global, self.json.as_bytes())?;
@@ -132,11 +130,7 @@ impl WindowEvent {
 
 /// UI thread: hand an event to the JS thread.
 fn post(vm: &bun_jsc::VmHandle, ev: HostEvent) {
-    let event = WindowEvent {
-        window: ev.window(),
-        ends_window: matches!(ev, HostEvent::Closed { .. } | HostEvent::CreateFailed { .. }),
-        json: ev.to_json(),
-    };
+    let event = WindowEvent { owner: ev.owner(), ends_owner: ev.ends_owner(), json: ev.to_json() };
     let payload = bun_core::heap::into_raw(Box::new(event));
     let task = ConcurrentTask::create(Task::init(payload));
     if let bun_jsc::vm_handle::Posted::Refused(task) = vm.post(bun_jsc::LoopKind::Regular, task) {
@@ -146,6 +140,18 @@ fn post(vm: &bun_jsc::VmHandle, ev: HostEvent) {
             drop(bun_core::heap::take(task.as_ptr()));
             drop(bun_core::heap::take(payload));
         }
+    }
+}
+
+fn hold(global: &JSGlobalObject, s: &mut State, id: u32) {
+    if s.alive.insert(id) {
+        global.bun_vm().event_loop_mut().ref_keep_alive();
+    }
+}
+
+fn release(global: &JSGlobalObject, s: &mut State, id: u32) {
+    if s.alive.remove(&id) {
+        global.bun_vm().event_loop_mut().unref_keep_alive();
     }
 }
 
@@ -197,11 +203,78 @@ pub(crate) fn create_window(global: &JSGlobalObject, frame: &CallFrame) -> JsRes
         .create_window_json(&json)
         .map_err(|e| global.throw_type_error(format_args!("{e}")))?;
     if let Some(s) = state() {
-        if s.alive.insert(id) {
-            global.bun_vm().event_loop_mut().ref_keep_alive();
-        }
+        hold(global, s, id);
     }
     Ok(JSValue::js_number(id as f64))
+}
+
+/// `setIcon(id, pngBase64)`
+#[bun_jsc::host_fn]
+pub(crate) fn set_icon(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+    let [id, png] = frame.arguments_as_array::<2>();
+    let png = string_arg(global, png, "icon")?;
+    ui(global)?
+        .set_icon_base64(id_arg(global, id)?, &png)
+        .map_err(|e| global.throw_type_error(format_args!("{e}")))?;
+    Ok(JSValue::UNDEFINED)
+}
+
+/// `setMenu(id, menuJson)`; `"null"` removes the menu bar.
+#[bun_jsc::host_fn]
+pub(crate) fn set_menu(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+    let [id, json] = frame.arguments_as_array::<2>();
+    let json = string_arg(global, json, "menu")?;
+    ui(global)?
+        .set_menu_json(id_arg(global, id)?, &json)
+        .map_err(|e| global.throw_type_error(format_args!("{e}")))?;
+    Ok(JSValue::UNDEFINED)
+}
+
+/// `popupMenu(id, menuJson, x?, y?)`: at a logical position, or at the cursor.
+#[bun_jsc::host_fn]
+pub(crate) fn popup_menu(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+    let [id, json, x, y] = frame.arguments_as_array::<4>();
+    let json = string_arg(global, json, "menu")?;
+    let at = if x.is_number() && y.is_number() { Some((x.as_number(), y.as_number())) } else { None };
+    ui(global)?
+        .popup_menu_json(id_arg(global, id)?, &json, at)
+        .map_err(|e| global.throw_type_error(format_args!("{e}")))?;
+    Ok(JSValue::UNDEFINED)
+}
+
+/// `trayCreate(trayJson) -> id`. A tray keeps the process alive until removed.
+#[bun_jsc::host_fn]
+pub(crate) fn tray_create(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+    let json = string_arg(global, frame.argument(0), "tray")?;
+    let id = ui(global)?
+        .create_tray_json(&json)
+        .map_err(|e| global.throw_type_error(format_args!("{e}")))?;
+    if let Some(s) = state() {
+        hold(global, s, id);
+    }
+    Ok(JSValue::js_number(id as f64))
+}
+
+/// `trayUpdate(id, trayJson)`: only the given fields change.
+#[bun_jsc::host_fn]
+pub(crate) fn tray_update(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+    let [id, json] = frame.arguments_as_array::<2>();
+    let json = string_arg(global, json, "tray")?;
+    ui(global)?
+        .update_tray_json(id_arg(global, id)?, &json)
+        .map_err(|e| global.throw_type_error(format_args!("{e}")))?;
+    Ok(JSValue::UNDEFINED)
+}
+
+/// `trayRemove(id)`
+#[bun_jsc::host_fn]
+pub(crate) fn tray_remove(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+    let id = id_arg(global, frame.argument(0))?;
+    ui(global)?.remove_tray(id);
+    if let Some(s) = state() {
+        release(global, s, id);
+    }
+    Ok(JSValue::UNDEFINED)
 }
 
 /// `evalScript(id, js)`

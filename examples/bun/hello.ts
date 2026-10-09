@@ -1,7 +1,7 @@
 // Run with a buntauri build of Bun:
 //   bun-debug examples/bun/hello.ts
 //   BUNTAURI_SELFTEST=1 bun-debug examples/bun/hello.ts   (automated round trip, exits by itself)
-import { Window, setAssetsDir } from "bun:buntauri";
+import { Tray, Window, setAssetsDir } from "bun:buntauri";
 
 setAssetsDir(import.meta.dir + "/assets");
 const selftest = !!process.env.BUNTAURI_SELFTEST;
@@ -13,7 +13,36 @@ const win = new Window({
   height: 480,
   center: true,
   theme: "dark",
+  icon: import.meta.dir + "/assets/icon.png",
+  menu: [
+    {
+      text: "File",
+      items: [
+        { text: "Say hello", accelerator: "CmdOrCtrl+H", action: () => win.emit("hello", { from: "the menu" }) },
+        { type: "separator" },
+        { text: "Quit", accelerator: "CmdOrCtrl+Q", action: () => quit() },
+      ],
+    },
+    { text: "Edit", items: [{ predefined: "copy" }, { predefined: "paste" }, { predefined: "selectAll" }] },
+  ],
 });
+
+// A tray icon keeps the app alive on its own; quit() removes it.
+const tray = new Tray({
+  icon: import.meta.dir + "/assets/icon.png",
+  tooltip: "buntauri + Bun",
+  menu: [
+    { text: "Say hello", action: () => win.emit("hello", { from: "the tray" }) },
+    { type: "separator" },
+    { text: "Quit", action: () => quit() },
+  ],
+});
+tray.on("click", ({ button }) => console.log(`tray clicked (${button})`));
+
+function quit() {
+  tray.remove();
+  win.close();
+}
 
 win.handle("greet", ({ name }) => `Hello ${name}, greetings from Bun ${Bun.version}!`);
 win.handle("versions", () => ({ bun: Bun.version, platform: process.platform, pid: process.pid }));
@@ -28,7 +57,7 @@ win.handle("done", async result => {
   console.log("selftest:", JSON.stringify(result));
   // With --windows-hide-console there is no console to read: write it to a file instead.
   if (process.env.BUNTAURI_SELFTEST_OUT) await Bun.write(process.env.BUNTAURI_SELFTEST_OUT, JSON.stringify(result));
-  win.close();
+  quit();
 });
 
 win.on("created", () => console.log("window open"));

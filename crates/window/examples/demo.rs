@@ -7,7 +7,10 @@
 use std::borrow::Cow;
 use std::sync::{mpsc, Arc};
 
+use base64::Engine as _;
 use buntauri_window::{mime_for, Asset, AssetProvider, HostEvent, UiThread, WindowOptions};
+
+const ICON: &[u8] = include_bytes!("assets/icon.png");
 
 /// Assets baked into the binary, like `bun build --compile` will do.
 struct Embedded;
@@ -36,8 +39,25 @@ fn main() {
         "label": "main", "title": "buntauri demo", "url": url,
         "width": 640, "height": 480, "minWidth": 400, "minHeight": 300,
         "center": true, "theme": "dark", "backgroundColor": "#111111",
+        "icon": base64::engine::general_purpose::STANDARD.encode(ICON),
+        "menu": [
+            { "text": "File", "items": [
+                { "id": "greet", "text": "Say hello", "accelerator": "CmdOrCtrl+H" },
+                { "type": "separator" },
+                { "id": "quit", "text": "Quit", "accelerator": "CmdOrCtrl+Q" },
+            ]},
+            { "text": "Edit", "items": [{ "predefined": "copy" }, { "predefined": "paste" }, { "predefined": "selectAll" }] },
+            { "text": "View", "items": [{ "id": "dark", "text": "Dark mode", "type": "check", "checked": true }] },
+        ],
     });
-    ui.create_window_json(&opts.to_string()).expect("window options");
+    let main_window = ui.create_window_json(&opts.to_string()).expect("window options");
+    let tray = serde_json::json!({
+        "icon": base64::engine::general_purpose::STANDARD.encode(ICON),
+        "tooltip": "buntauri demo",
+        "menu": [{ "id": "show", "text": "Say hello" }, { "type": "separator" }, { "id": "quit", "text": "Quit" }],
+    });
+    let tray_id = ui.create_tray_json(&tray.to_string()).expect("tray");
+    let mut problems = 0;
     open += 1;
     if selftest {
         // A page outside app:// must NOT be able to invoke.
@@ -76,11 +96,29 @@ fn main() {
                     }
                     "done" => {
                         println!("[host] selftest result: {args}");
+                        println!("[host] native problems: {problems}");
+                        ui.remove_tray(tray_id);
                         ui.resolve(window, call, "null");
                         ui.close(window);
                     }
                     other => ui.reject(window, call, &format!("unknown command: {other}")),
                 }
+            }
+            HostEvent::Menu { window, tray, id } => {
+                println!("[host] menu {id:?} (window {window:?}, tray {tray:?})");
+                match id.as_str() {
+                    "greet" | "show" => ui.emit(main_window, "tick", "\"hello from the menu\""),
+                    "quit" => {
+                        ui.remove_tray(tray_id);
+                        ui.close(main_window);
+                    }
+                    _ => {}
+                }
+            }
+            HostEvent::Tray { tray, kind, button, .. } => println!("[host] tray {tray} {kind} {button}"),
+            HostEvent::TrayFailed { tray, message } => {
+                problems += 1;
+                eprintln!("[host] tray {tray} failed: {message}");
             }
             HostEvent::DragDrop { window, kind, paths, x, y } => println!("[host] drag {kind} {paths:?} at {x},{y} in window {window}"),
             HostEvent::CreateFailed { window, message } => {
@@ -99,6 +137,9 @@ fn main() {
                 }
             }
             HostEvent::Error { window, message } => {
+                if !message.starts_with("ipc blocked") {
+                    problems += 1;
+                }
                 eprintln!("[host] error (window {window:?}): {message}");
                 if let (Some(w), true) = (window, message.starts_with("ipc blocked")) {
                     ui.close(w);

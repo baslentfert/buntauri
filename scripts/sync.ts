@@ -205,3 +205,13 @@ if (failed) {
   process.exit(1);
 }
 console.log(changed ? `${changed} edit(s) applied.` : "Already in sync.");
+
+// Bun builds with `cargo --locked`: record our crates (and any new
+// dependencies of crates/window) in Bun's Cargo.lock. This only adds
+// entries; versions Bun already pins are left alone.
+const meta = Bun.spawnSync(["cargo", "metadata", "--format-version", "1"], { cwd: bun, stdout: "ignore", stderr: "pipe" });
+if (meta.exitCode !== 0) {
+  console.error(`cargo metadata failed:\n${meta.stderr.toString()}`);
+  process.exit(1);
+}
+console.log("Cargo.lock up to date.");
