@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <title>buntauri demo</title>
+  <style>
+    body { font: 15px system-ui, sans-serif; margin: 2rem; background: #111; color: #eee; }
+    button, input { font: inherit; padding: .4rem .8rem; margin: .2rem; }
+    pre { background: #222; padding: 1rem; border-radius: 6px; min-height: 6rem; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>buntauri</h1>
+  <p>Deze pagina komt uit <code>app://</code> (embedded assets). Knoppen roepen de host-thread aan.</p>
+  <input id="name" value="Bas">
+  <button id="greet">greet</button>
+  <button id="uptime">uptime</button>
+  <button id="title">titel wijzigen</button>
+  <button id="tick">events</button>
+  <button id="bad">onbekend commando</button>
+  <pre id="out"></pre>
+  <script src="app.js"></script>
+</body>
+</html>

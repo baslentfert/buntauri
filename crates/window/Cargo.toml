@@ -1,0 +1,12 @@
+[package]
+name = "buntauri_window"
+version = "0.1.0"
+edition = "2021"
+description = "Native window layer for buntauri: tao + wry on a dedicated UI thread, driven by a host (Bun) thread"
+license = "MIT"
+
+[dependencies]
+tao = "0.37"
+wry = "0.57"
+serde_json = "1"
+
