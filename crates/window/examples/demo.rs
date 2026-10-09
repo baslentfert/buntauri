@@ -28,32 +28,23 @@ fn main() {
     let ui = UiThread::spawn(move |ev| { let _ = tx.send(ev); }, Arc::new(Embedded)).expect("spawn UI thread");
 
     let mut open = 0;
-    ui.create_window(WindowOptions { title: "buntauri demo".into(), width: 640.0, height: 480.0, ..Default::default() });
+    let selftest = std::env::var_os("BUNTAURI_SELFTEST").is_some();
+    // With ?selftest the page runs the round-trip test itself and reports via invoke("done").
+    let url = if selftest { "index.html?selftest" } else { "index.html" };
+    ui.create_window(WindowOptions { title: "buntauri demo".into(), width: 640.0, height: 480.0, url: Some(url.into()), ..Default::default() });
     open += 1;
+    if selftest {
+        // A page outside app:// must NOT be able to invoke.
+        let w = ui.create_window(WindowOptions { title: "untrusted".into(), url: Some("data:text/html,<p>untrusted</p>".into()), ..Default::default() });
+        ui.eval(w, "window.__BUNTAURI__.invoke('greet', {name: 'evil'})");
+        open += 1;
+    }
 
     // The "JS thread" event loop.
     let started = std::time::Instant::now();
     for ev in rx {
         match ev {
-            HostEvent::Created { window } => {
-                println!("[host] window {window} created");
-                if std::env::var_os("BUNTAURI_SELFTEST").is_some() {
-                    // Drive the page from the host and report back via invoke("done").
-                    ui.eval(window, r#"window.addEventListener("load", async () => {
-                        const { invoke, listen } = window.__BUNTAURI__;
-                        const r = { href: location.href };
-                        const ticks = [];
-                        listen("tick", (n) => ticks.push(n));
-                        r.greet = await invoke("greet", { name: "selftest" });
-                        r.uptime = typeof (await invoke("uptime"));
-                        await invoke("tick");
-                        r.ticks = ticks;
-                        r.reject = await invoke("nope").then(() => "no error", (e) => e.message);
-                        r.appJs = typeof document.getElementById("out").textContent;
-                        await invoke("done", r);
-                    })"#);
-                }
-            }
+            HostEvent::Created { window } => println!("[host] window {window} created"),
             HostEvent::Invoke { window, call, cmd, args } => {
                 println!("[host] invoke #{call} {cmd}({args}) from window {window}");
                 match cmd.as_str() {
@@ -91,7 +82,12 @@ fn main() {
                     break;
                 }
             }
-            HostEvent::Error { window, message } => eprintln!("[host] error (window {window:?}): {message}"),
+            HostEvent::Error { window, message } => {
+                eprintln!("[host] error (window {window:?}): {message}");
+                if let (Some(w), true) = (window, message.starts_with("ipc blocked")) {
+                    ui.close(w);
+                }
+            }
             HostEvent::Exited => break,
         }
     }

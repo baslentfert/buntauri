@@ -12,3 +12,17 @@ $("tick").onclick = () => invoke("tick");
 $("bad").onclick = () => invoke("nope").catch((e) => log(`fout: ${e.message}`));
 
 log(`geladen vanaf ${location.href}`);
+
+if (new URLSearchParams(location.search).has("selftest")) {
+  (async () => {
+    const r = { href: location.href };
+    const ticks = [];
+    listen("tick", (n) => ticks.push(n));
+    r.greet = await invoke("greet", { name: "selftest" });
+    r.uptime = typeof (await invoke("uptime"));
+    await invoke("tick");
+    r.ticks = ticks;
+    r.reject = await invoke("nope").then(() => "no error", (e) => e.message);
+    await invoke("done", r);
+  })();
+}

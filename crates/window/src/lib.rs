@@ -41,6 +41,9 @@ pub struct WindowOptions {
     /// Inline HTML, used when `url` is `None`.
     pub html: Option<String>,
     pub devtools: bool,
+    /// Let pages outside `app://` (remote sites) call `invoke`. Off by default:
+    /// any page that can invoke can run host code.
+    pub allow_remote_ipc: bool,
 }
 
 impl Default for WindowOptions {
@@ -52,6 +55,7 @@ impl Default for WindowOptions {
             url: None,
             html: None,
             devtools: cfg!(debug_assertions),
+            allow_remote_ipc: false,
         }
     }
 }
@@ -255,12 +259,20 @@ fn create(
         .map_err(|e| e.to_string())?;
 
     let ipc_emit = emit.clone();
+    // Inline HTML comes from the host itself, so it is trusted like app://.
+    let trust_inline = opts.url.is_none() && opts.html.is_some();
     let assets = assets.clone();
     let mut builder = WebViewBuilder::new()
         .with_devtools(opts.devtools)
         .with_initialization_script(BRIDGE_JS)
         .with_custom_protocol(ASSET_SCHEME.into(), move |_, req| serve_asset(&*assets, &req))
-        .with_ipc_handler(move |req: Request<String>| on_ipc(id, req.body(), &ipc_emit));
+        .with_ipc_handler(move |req: Request<String>| {
+            if allow_ipc(req.uri(), trust_inline, opts.allow_remote_ipc) {
+                on_ipc(id, req.body(), &ipc_emit);
+            } else {
+                ipc_emit(HostEvent::Error { window: Some(id), message: format!("ipc blocked from {}", req.uri()) });
+            }
+        });
 
     builder = match (opts.url, opts.html) {
         (Some(url), _) => builder.with_url(resolve_url(&url)),
@@ -305,6 +317,21 @@ fn serve_asset(assets: &dyn AssetProvider, req: &Request<Vec<u8>>) -> Response<C
             .header(CONTENT_TYPE, "text/plain")
             .body(Cow::Borrowed(&b"not found"[..]))
             .unwrap(),
+    }
+}
+
+/// IPC is only accepted from pages served by our own asset protocol
+/// (`app://localhost`, or `http(s)://app.localhost` on Windows/Android).
+fn allow_ipc(uri: &wry::http::Uri, trust_inline: bool, allow_remote: bool) -> bool {
+    if allow_remote {
+        return true;
+    }
+    let host = uri.host().unwrap_or("");
+    match uri.scheme_str() {
+        Some(s) if s == ASSET_SCHEME => host == "localhost",
+        Some("http") | Some("https") => host == format!("{ASSET_SCHEME}.localhost"),
+        // about:blank / data: for inline HTML set by the host.
+        _ => trust_inline,
     }
 }
 

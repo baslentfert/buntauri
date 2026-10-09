@@ -54,7 +54,8 @@ buntauri/
 
 ## Status
 
-- [x] `crates/window`: UI-thread, vensters, `app://` assets, invoke/resolve/reject, events.
+- [x] `crates/window`: UI-thread, vensters, `app://` assets, invoke/resolve/reject, events,
+      IPC alleen vanaf `app://` (externe pagina's geblokkeerd).
       Test: `cargo run --example demo` (`BUNTAURI_SELFTEST=1` voor de automatische test).
 - [ ] Fase 0: vanilla Bun bouwen (LLVM 23.1.1, rustup nightly, Go, NASM, Perl, Ruby).
 - [ ] Fase 1: `bun-glue` + `patches` -> `Bun.Window` in JS.
