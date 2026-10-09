@@ -94,6 +94,10 @@ What is left is the native shell around the window:
 - [x] Global shortcuts (`global-hotkey`): `globalShortcut.register()`
 - [x] Clipboard text (`arboard`): `clipboard.readText()/writeText()`
 - [x] Single instance: `requestSingleInstance()`, a named pipe / socket in TS, no native code
+- [x] Webview control: `navigate`, `reload`, devtools, `setZoom`, `print`; `externalLinks`
+      (browser | block | allow) with `externallink` events; `evaluate()` with a result
+- [x] Taskbar progress (`setProgress`) and `monitors()`. No badge count: tao has none on Windows.
+- [ ] Toasts with the app as sender (AppUserModelID + Start menu shortcut), part of `buntauri build`
 - [ ] Deep links / custom URL scheme (registry)
 - [ ] `@tauri-apps/api` compatibility layer (`invoke`, events)
 - [ ] CSP headers on `app://`

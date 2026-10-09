@@ -35,6 +35,17 @@ pub enum WindowOp {
     StartDragging,
     /// Flash the taskbar button / bounce the dock icon.
     RequestAttention,
+    /// Load a URL; relative paths load from `app://`.
+    Navigate { url: String },
+    Reload,
+    OpenDevtools,
+    CloseDevtools,
+    /// Page zoom, 1.0 = 100%.
+    SetZoom { factor: f64 },
+    Print,
+    /// Taskbar/dock progress: `progress` 0..1 (null = keep), `state`: none |
+    /// normal | indeterminate | paused | error.
+    SetProgress { progress: Option<f64>, state: Option<String> },
 }
 
 impl WindowOp {
@@ -44,7 +55,7 @@ impl WindowOp {
 }
 
 /// Apply `op`. `prevent_close` is the window's close policy, owned by the caller.
-pub(crate) fn apply(window: &Window, op: &WindowOp, prevent_close: &mut bool) -> Result<(), String> {
+pub(crate) fn apply(window: &Window, webview: &wry::WebView, op: &WindowOp, prevent_close: &mut bool) -> Result<(), String> {
     match *op {
         WindowOp::Show => window.set_visible(true),
         WindowOp::Hide => window.set_visible(false),
@@ -84,12 +95,34 @@ pub(crate) fn apply(window: &Window, op: &WindowOp, prevent_close: &mut bool) ->
         WindowOp::SetPreventClose { value } => *prevent_close = value,
         WindowOp::StartDragging => window.drag_window().map_err(|e| e.to_string())?,
         WindowOp::RequestAttention => window.request_user_attention(Some(tao::window::UserAttentionType::Informational)),
+        WindowOp::Navigate { ref url } => webview.load_url(&crate::resolve_url(url)).map_err(|e| e.to_string())?,
+        WindowOp::Reload => webview.reload().map_err(|e| e.to_string())?,
+        WindowOp::OpenDevtools => webview.open_devtools(),
+        WindowOp::CloseDevtools => webview.close_devtools(),
+        WindowOp::SetZoom { factor } => webview.zoom(factor).map_err(|e| e.to_string())?,
+        WindowOp::Print => webview.print().map_err(|e| e.to_string())?,
+        WindowOp::SetProgress { progress, ref state } => {
+            use tao::window::{ProgressBarState, ProgressState};
+            let state = match state.as_deref() {
+                None => None,
+                Some("none") => Some(ProgressState::None),
+                Some("normal") => Some(ProgressState::Normal),
+                Some("indeterminate") => Some(ProgressState::Indeterminate),
+                Some("paused") => Some(ProgressState::Paused),
+                Some("error") => Some(ProgressState::Error),
+                Some(other) => return Err(format!("unknown progress state {other:?}")),
+            };
+            let progress = progress.map(|p| (p.clamp(0.0, 1.0) * 100.0).round() as u64);
+            // A value alone means "normal" progress.
+            let state = state.or(progress.map(|_| ProgressState::Normal));
+            window.set_progress_bar(ProgressBarState { state, progress, desktop_filename: None });
+        }
     }
     Ok(())
 }
 
 /// What the host can read at any time (`win.state` in JS).
-pub(crate) fn snapshot(window: &Window, prevent_close: bool) -> Value {
+pub(crate) fn snapshot(window: &Window, webview: &wry::WebView, prevent_close: bool) -> Value {
     let scale = window.scale_factor();
     let size = window.inner_size().to_logical::<f64>(scale);
     let pos = window.outer_position().map(|p| p.to_logical::<f64>(scale)).ok();
@@ -108,6 +141,8 @@ pub(crate) fn snapshot(window: &Window, prevent_close: bool) -> Value {
         "x": pos.map(|p| p.x),
         "y": pos.map(|p| p.y),
         "scaleFactor": scale,
+        "url": webview.url().ok(),
+        "devtoolsOpen": webview.is_devtools_open(),
     })
 }
 
@@ -125,6 +160,12 @@ mod tests {
         ));
         assert!(matches!(WindowOp::from_json(r#"{"op":"setPreventClose","value":true}"#), Ok(WindowOp::SetPreventClose { value: true })));
         assert!(matches!(WindowOp::from_json(r#"{"op":"setMinSize","width":null,"height":null}"#), Ok(WindowOp::SetMinSize { width: None, height: None })));
+        assert!(matches!(WindowOp::from_json(r#"{"op":"navigate","url":"about.html"}"#), Ok(WindowOp::Navigate { .. })));
+        assert!(matches!(
+            WindowOp::from_json(r#"{"op":"setProgress","progress":0.5,"state":null}"#),
+            Ok(WindowOp::SetProgress { progress: Some(p), state: None }) if p == 0.5
+        ));
+        assert!(matches!(WindowOp::from_json(r#"{"op":"setZoom","factor":1.25}"#), Ok(WindowOp::SetZoom { .. })));
         assert!(WindowOp::from_json(r#"{"op":"explode"}"#).is_err());
         assert!(WindowOp::from_json(r#"{"op":"setSize","width":"big"}"#).is_err());
     }

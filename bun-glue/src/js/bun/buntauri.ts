@@ -26,6 +26,8 @@ const nativeWindowState = $newRustFunction("buntauri/window.rs", "windowState", 
 const nativeDialog = $newRustFunction("buntauri/window.rs", "dialog", 2);
 const nativeNotify = $newRustFunction("buntauri/window.rs", "notify", 1);
 const nativeShortcut = $newRustFunction("buntauri/window.rs", "shortcut", 2);
+const nativeEvaluate = $newRustFunction("buntauri/window.rs", "evaluate", 2);
+const nativeMonitors = $newRustFunction("buntauri/window.rs", "monitors", 0);
 const nativeClipboardRead = $newRustFunction("buntauri/window.rs", "clipboardRead", 0);
 const nativeClipboardWrite = $newRustFunction("buntauri/window.rs", "clipboardWrite", 1);
 const nativeTrayCreate = $newRustFunction("buntauri/window.rs", "trayCreate", 1);
@@ -169,13 +171,17 @@ type WindowState = {
   x: number | null;
   y: number | null;
   scaleFactor: number;
+  /** The page's current URL. */
+  url: string | null;
+  devtoolsOpen: boolean;
 };
 
 /**
  * A native window with a webview.
  * Events: "created", "closed", "menu" (item id), "dragdrop", "error", "warning",
  * "resized" ({ width, height }), "moved" ({ x, y }), "focus", "blur",
- * "scalechanged" ({ scaleFactor }), "closerequested" (only with preventClose).
+ * "scalechanged" ({ scaleFactor }), "closerequested" (only with preventClose),
+ * "externallink" ({ url, action: "opened" | "blocked" | "failed" }; see the externalLinks option).
  */
 class Window extends Emitter {
   #id: number;
@@ -295,6 +301,28 @@ class Window extends Emitter {
   startDragging() { return this.#op("startDragging"); }
   /** Flash the taskbar button. */
   requestAttention() { return this.#op("requestAttention"); }
+  /** Load a URL; relative paths load from app://. */
+  navigate(url: string) { return this.#op("navigate", { url: String(url) }); }
+  reload() { return this.#op("reload"); }
+  /** Needs the window option `devtools: true` in release builds. */
+  openDevtools() { return this.#op("openDevtools"); }
+  closeDevtools() { return this.#op("closeDevtools"); }
+  /** Page zoom; 1 = 100%. */
+  setZoom(factor: number) { return this.#op("setZoom", { factor }); }
+  print() { return this.#op("print"); }
+  /**
+   * Progress on the taskbar button: `progress` 0..1, or null to only change the state.
+   * `state`: "normal" | "indeterminate" | "paused" | "error" | "none" (removes it).
+   */
+  setProgress(progress: number | null, state?: "none" | "normal" | "indeterminate" | "paused" | "error") {
+    return this.#op("setProgress", { progress, state: state ?? null });
+  }
+
+  /** Evaluate a JavaScript expression in the page and get its (JSON) value. Promises are not awaited. */
+  evaluate<T = unknown>(expression: string): Promise<T> {
+    if (this.#closed) return Promise.reject(new Error("window is closed"));
+    return request<T>(nativeEvaluate(this.#id, String(expression)));
+  }
 
   /** @internal */
   _dispatch(ev: any) {
@@ -495,6 +523,16 @@ function notify(options: { title: string; body?: string; appId?: string; icon?: 
   return request<void>(nativeNotify(JSON.stringify(options)));
 }
 
+// ── Monitors ────────────────────────────────────────────────────────────────
+
+type Monitor = { name: string | null; x: number; y: number; width: number; height: number; scaleFactor: number; primary: boolean };
+
+/** The connected monitors, in CSS pixels. */
+function monitors(): Promise<Monitor[]> {
+  start();
+  return request<Monitor[]>(nativeMonitors());
+}
+
 // ── Clipboard ───────────────────────────────────────────────────────────────
 
 const clipboard = {
@@ -586,6 +624,7 @@ export default {
   setAssetsDir,
   dialog,
   notify,
+  monitors,
   clipboard,
   globalShortcut,
   requestSingleInstance,

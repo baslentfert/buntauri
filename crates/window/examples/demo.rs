@@ -42,6 +42,8 @@ fn main() {
         "label": "main", "title": "buntauri demo", "url": url,
         "width": 640, "height": 480, "minWidth": 400, "minHeight": 300,
         "center": true, "theme": "dark", "backgroundColor": "#111111",
+        // In the selftest, links to other sites are blocked (no browser pops up).
+        "externalLinks": if selftest { "block" } else { "browser" },
         "icon": base64::engine::general_purpose::STANDARD.encode(ICON),
         "menu": [
             { "text": "File", "items": [
@@ -138,6 +140,9 @@ fn main() {
                         println!("[host] native problems: {problems}");
                         ui.remove_tray(tray_id);
                         resize_check = true;
+                        println!("[host] eval req #{}", ui.eval_result(window, "document.title + ' / ' + (1 + 2)"));
+                        println!("[host] monitors req #{}", ui.monitors());
+                        ui.eval(window, "window.open('https://example.com/popup'); location.href = 'https://example.com/away';");
                         ui.window_op_json(window, r#"{"op":"setSize","width":700,"height":500}"#).unwrap();
                         ui.resolve(window, call, "null");
                     }
@@ -158,6 +163,8 @@ fn main() {
             HostEvent::Window { window, kind, data } => {
                 println!("[host] window {window} {kind} {data}");
                 if resize_check && kind == "resized" {
+                    // Give the eval/monitor replies and link events a moment.
+                    std::thread::sleep(std::time::Duration::from_millis(300));
                     let state: serde_json::Value = serde_json::from_str(&ui.window_state_json(window)).unwrap();
                     println!("[host] state after setSize: {}x{} visible={}", state["width"], state["height"], state["visible"]);
                     resize_check = false;

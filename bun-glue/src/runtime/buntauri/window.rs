@@ -283,6 +283,23 @@ pub(crate) fn shortcut(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<J
     Ok(hold_request(global, req))
 }
 
+/// `evaluate(id, expression) -> req`: the expression's JSON value comes back as a Reply.
+#[bun_jsc::host_fn]
+pub(crate) fn evaluate(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+    let [id, js] = frame.arguments_as_array::<2>();
+    let id = id_arg(global, id)?;
+    let js = string_arg(global, js, "expression")?;
+    let req = ui(global)?.eval_result(id, &js);
+    Ok(hold_request(global, req))
+}
+
+/// `monitors() -> req`: the monitor list comes back as a Reply.
+#[bun_jsc::host_fn]
+pub(crate) fn monitors(global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {
+    let req = ui(global)?.monitors();
+    Ok(hold_request(global, req))
+}
+
 /// `clipboardRead() -> string | null`. Needs no UI thread.
 #[bun_jsc::host_fn]
 pub(crate) fn clipboard_read(global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {

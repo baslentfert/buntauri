@@ -34,7 +34,7 @@ mod options;
 pub use control::WindowOp;
 pub use extras::{clipboard_read_text, clipboard_write_text, DialogSpec, NotificationSpec};
 pub use native::{decode_base64, decode_png, MenuItemSpec, Owner, TraySpec};
-pub use options::{BackgroundThrottling, Color, IpcPolicy, PreventOverflow, ScrollBarStyle, Theme, WindowOptions};
+pub use options::{BackgroundThrottling, Color, ExternalLinks, IpcPolicy, PreventOverflow, ScrollBarStyle, Theme, WindowOptions};
 
 /// Id of a tray icon. Shares the id space with windows.
 pub type TrayId = u32;
@@ -171,7 +171,7 @@ impl HostEvent {
             "closed" => HostEvent::Closed { window: window()? },
             "window" => HostEvent::Window {
                 window: window()?,
-                kind: kind("kind", &["resized", "moved", "focus", "blur", "scalechanged", "closerequested"]),
+                kind: kind("kind", &["resized", "moved", "focus", "blur", "scalechanged", "closerequested", "externallink"]),
                 data: v["data"].clone(),
             },
             "createfailed" => HostEvent::CreateFailed { window: window()?, message: text("message") },
@@ -354,6 +354,10 @@ enum Command {
     TrayCreate(TrayId, TraySpec, #[serde(with = "rgba_serde::opt")] Option<Rgba>),
     TrayUpdate(TrayId, TraySpec, #[serde(with = "rgba_serde::opt")] Option<Rgba>),
     TrayRemove(TrayId),
+    /// Evaluate an expression in the page; its JSON value comes back as a Reply.
+    EvalResult(WindowId, u64, String),
+    /// List the monitors; answered by a Reply.
+    Monitors(u64),
     Dialog(u64, Option<WindowId>, DialogSpec),
     Notify(u64, NotificationSpec),
     Shortcut(u64, bool, String),
@@ -442,6 +446,21 @@ impl UiThread {
     /// after it closed). Updated by the UI thread after every change.
     pub fn window_state_json(&self, window: WindowId) -> String {
         self.states.lock().unwrap().get(&window).map_or_else(|| "null".into(), |v| v.to_string())
+    }
+
+    /// Evaluate a JavaScript expression in the page. Answered by a Reply with
+    /// the expression's value (JSON). Promises are not awaited.
+    pub fn eval_result(&self, window: WindowId, js: &str) -> u64 {
+        let req = self.next_req.fetch_add(1, Ordering::Relaxed);
+        self.send(Command::EvalResult(window, req, js.to_string()));
+        req
+    }
+
+    /// List the monitors (name, position, size, scale factor, primary). Answered by a Reply.
+    pub fn monitors(&self) -> u64 {
+        let req = self.next_req.fetch_add(1, Ordering::Relaxed);
+        self.send(Command::Monitors(req));
+        req
     }
 
     /// Show a dialog ([`DialogSpec`] as JSON), modal to `window` if given.
@@ -587,7 +606,7 @@ struct Entry {
 }
 
 fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc<dyn AssetProvider>, on_state: StateSink) {
-    let snap = |id: WindowId, e: &Entry| on_state(id, Some(control::snapshot(&e.window, e.prevent_close)));
+    let snap = |id: WindowId, e: &Entry| on_state(id, Some(control::snapshot(&e.window, &e.webview, e.prevent_close)));
     let forget = |id: WindowId| on_state(id, None);
     let mut builder = EventLoopBuilder::<Command>::with_user_event();
     #[cfg(target_os = "windows")]
@@ -714,7 +733,7 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
                 }
                 Command::Op(id, op) => {
                     if let Some(e) = windows.get_mut(&id) {
-                        if let Err(message) = control::apply(&e.window, &op, &mut e.prevent_close) {
+                        if let Err(message) = control::apply(&e.window, &e.webview, &op, &mut e.prevent_close) {
                             emit(HostEvent::Error { window: Some(id), message });
                         }
                         snap(id, e);
@@ -800,6 +819,44 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
                         emit(HostEvent::Reply { req, ok: false, value: e.to_string().into() });
                     }
                 }
+                Command::EvalResult(id, req, js) => {
+                    let Some(e) = windows.get(&id) else {
+                        emit(HostEvent::Reply { req, ok: false, value: "window is closed".into() });
+                        return;
+                    };
+                    let reply = emit.clone();
+                    // Wrapped so a thrown error comes back as a rejected reply.
+                    let script = format!(
+                        "(() => {{ try {{ return {{ ok: true, value: ({js}) }}; }} catch (e) {{ return {{ ok: false, value: String(e && e.message || e) }}; }} }})()"
+                    );
+                    let result = e.webview.evaluate_script_with_callback(&script, move |json| {
+                        let v: serde_json::Value = serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
+                        let ok = v["ok"].as_bool().unwrap_or(false);
+                        reply(HostEvent::Reply { req, ok, value: v["value"].clone() });
+                    });
+                    if let Err(err) = result {
+                        emit(HostEvent::Reply { req, ok: false, value: err.to_string().into() });
+                    }
+                }
+                Command::Monitors(req) => {
+                    let primary = target.primary_monitor();
+                    let list: Vec<serde_json::Value> = target
+                        .available_monitors()
+                        .map(|m| {
+                            let scale = m.scale_factor();
+                            let pos = m.position().to_logical::<f64>(scale);
+                            let size = m.size().to_logical::<f64>(scale);
+                            serde_json::json!({
+                                "name": m.name(),
+                                "x": pos.x, "y": pos.y,
+                                "width": size.width, "height": size.height,
+                                "scaleFactor": scale,
+                                "primary": primary.as_ref().is_some_and(|p| p.name() == m.name() && p.position() == m.position()),
+                            })
+                        })
+                        .collect();
+                    emit(HostEvent::Reply { req, ok: true, value: list.into() });
+                }
                 Command::Shortcut(req, register, accelerator) => {
                     let result = (|| -> Result<(), String> {
                         let hotkey = extras::parse_shortcut(&accelerator)?;
@@ -865,7 +922,7 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
                 };
                 // The event's own size/position: on macOS the window can still
                 // report the old values while the event is delivered.
-                let mut state = control::snapshot(&e.window, e.prevent_close);
+                let mut state = control::snapshot(&e.window, &e.webview, e.prevent_close);
                 if let (Some(state), Some(fresh)) = (state.as_object_mut(), data.as_object()) {
                     state.extend(fresh.clone());
                 }
@@ -950,6 +1007,31 @@ fn create(
                 Access::Denied => ipc_emit(HostEvent::Error { window: Some(id), message: format!("ipc blocked from {origin}") }),
             }
         });
+
+    // Links to other sites: open them in the browser, block them, or allow
+    // them (ExternalLinks). Our own pages, data:/about:/blob: and the
+    // window's start origin always navigate normally.
+    {
+        let start_origin = opts.url.as_deref().map(resolve_url).and_then(|u| origin_of(&u));
+        let nav_policy = opts.external_links;
+        let nav_emit = emit.clone();
+        let nav_start = start_origin.clone();
+        builder = builder.with_navigation_handler(move |url: String| {
+            if nav_policy == ExternalLinks::Allow || is_own_url(&url, nav_start.as_deref()) {
+                return true;
+            }
+            external_link(&url, nav_policy, id, &nav_emit);
+            false
+        });
+        let new_emit = emit.clone();
+        builder = builder.with_new_window_req_handler(move |url: String, _features| {
+            if nav_policy == ExternalLinks::Allow {
+                return wry::NewWindowResponse::Allow;
+            }
+            external_link(&url, nav_policy, id, &new_emit);
+            wry::NewWindowResponse::Deny
+        });
+    }
 
     if opts.drag_drop_enabled {
         let dd_emit = emit.clone();
@@ -1117,6 +1199,46 @@ fn update_tray(t: &tray_icon::TrayIcon, id: TrayId, spec: &TraySpec, icon: Optio
         t.set_visible(v).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// `scheme://host[:port]` of a URL, lowercased.
+fn origin_of(url: &str) -> Option<String> {
+    let uri: wry::http::Uri = url.parse().ok()?;
+    let mut o = format!("{}://{}", uri.scheme_str()?, uri.host()?);
+    if let Some(port) = uri.port_u16() {
+        o.push_str(&format!(":{port}"));
+    }
+    Some(o.to_ascii_lowercase())
+}
+
+/// Navigation that stays inside the app: our asset protocol (also as
+/// `http(s)://app.localhost`), data:/about:/blob:, or the window's start origin.
+fn is_own_url(url: &str, start_origin: Option<&str>) -> bool {
+    let lower = url.to_ascii_lowercase();
+    if ["data:", "about:", "blob:", "javascript:"].iter().any(|p| lower.starts_with(p)) {
+        return true;
+    }
+    let Some(origin) = origin_of(url) else { return false };
+    origin == format!("{ASSET_SCHEME}://localhost")
+        || origin == format!("http://{ASSET_SCHEME}.localhost")
+        || origin == format!("https://{ASSET_SCHEME}.localhost")
+        || start_origin == Some(origin.as_str())
+}
+
+/// A link to another site was followed: open it in the browser (only http/https/mailto)
+/// or drop it, and tell the host.
+fn external_link(url: &str, policy: ExternalLinks, window: WindowId, emit: &Emit) {
+    let lower = url.to_ascii_lowercase();
+    let openable = ["http://", "https://", "mailto:"].iter().any(|p| lower.starts_with(p));
+    let action = if policy == ExternalLinks::Browser && openable {
+        match open::that_detached(url) {
+            Ok(()) => "opened",
+            Err(_) => "failed",
+        }
+    } else {
+        "blocked"
+    };
+    emit(HostEvent::Window { window, kind: "externallink", data: serde_json::json!({ "url": url, "action": action }) });
 }
 
 fn resolve_url(url: &str) -> String {
@@ -1317,6 +1439,19 @@ mod tests {
     }
 
     #[test]
+    fn own_urls() {
+        assert!(is_own_url("app://localhost/index.html", None));
+        assert!(is_own_url("http://app.localhost/x?y", None));
+        assert!(is_own_url("about:blank", None));
+        assert!(is_own_url("data:text/html,hi", None));
+        assert!(!is_own_url("https://example.com/", None));
+        assert!(is_own_url("https://example.com/page", Some("https://example.com")));
+        assert!(!is_own_url("https://evil.com/", Some("https://example.com")));
+        assert!(!is_own_url("http://app.localhost.evil.com/", None));
+        assert_eq!(origin_of("HTTPS://Example.com:8443/a").as_deref(), Some("https://example.com:8443"));
+    }
+
+    #[test]
     fn events_round_trip() {
         let events = [
             HostEvent::Created { window: 1 },
@@ -1354,6 +1489,8 @@ mod tests {
             Command::Dialog(3, Some(1), DialogSpec::from_json(r#"{"kind":"open","multiple":true,"filters":[{"name":"T","extensions":["txt"]}]}"#).unwrap()),
             Command::Notify(4, NotificationSpec::from_json(r#"{"title":"t","body":"b"}"#).unwrap()),
             Command::Shortcut(5, true, "CmdOrCtrl+Shift+B".into()),
+            Command::EvalResult(1, 6, "document.title".into()),
+            Command::Monitors(7),
             Command::Shutdown,
         ];
         for cmd in cmds {

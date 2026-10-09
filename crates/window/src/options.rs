@@ -101,6 +101,9 @@ pub struct WindowOptions {
     /// buntauri extra: the close button emits `closerequested` instead of
     /// closing (e.g. to hide to the tray). Can be changed at run time.
     pub prevent_close: bool,
+    /// buntauri extra: what links to other sites do (navigation away from
+    /// `app://` and the window's own start URL, and new-window requests).
+    pub external_links: ExternalLinks,
 
     /// Everything else (unknown keys and options not applied on this platform).
     #[serde(flatten)]
@@ -164,6 +167,7 @@ impl Default for WindowOptions {
             icon: None,
             menu: None,
             prevent_close: false,
+            external_links: ExternalLinks::Browser,
             other: serde_json::Map::new(),
         }
     }
@@ -183,6 +187,19 @@ pub struct IpcPolicy {
     pub remote: Vec<String>,
     /// Commands remote pages may call. `None` = all commands.
     pub remote_commands: Option<Vec<String>>,
+}
+
+/// See [`WindowOptions::external_links`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExternalLinks {
+    /// Open them in the default browser (default).
+    #[default]
+    Browser,
+    /// Ignore them.
+    Block,
+    /// Navigate this webview (new-window requests open a webview window).
+    Allow,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
