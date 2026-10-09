@@ -23,12 +23,19 @@ const nativeSetMenu = $newRustFunction("buntauri/window.rs", "setMenu", 2);
 const nativePopupMenu = $newRustFunction("buntauri/window.rs", "popupMenu", 4);
 const nativeWindowOp = $newRustFunction("buntauri/window.rs", "windowOp", 2);
 const nativeWindowState = $newRustFunction("buntauri/window.rs", "windowState", 1);
+const nativeDialog = $newRustFunction("buntauri/window.rs", "dialog", 2);
+const nativeNotify = $newRustFunction("buntauri/window.rs", "notify", 1);
+const nativeShortcut = $newRustFunction("buntauri/window.rs", "shortcut", 2);
+const nativeClipboardRead = $newRustFunction("buntauri/window.rs", "clipboardRead", 0);
+const nativeClipboardWrite = $newRustFunction("buntauri/window.rs", "clipboardWrite", 1);
 const nativeTrayCreate = $newRustFunction("buntauri/window.rs", "trayCreate", 1);
 const nativeTrayUpdate = $newRustFunction("buntauri/window.rs", "trayUpdate", 2);
 const nativeTrayRemove = $newRustFunction("buntauri/window.rs", "trayRemove", 1);
 
-const { readFileSync } = require("node:fs");
+const { readFileSync, unlinkSync } = require("node:fs");
 const { Buffer } = require("node:buffer");
+const net = require("node:net");
+const { tmpdir } = require("node:os");
 
 const windows = new Map<number, Window>();
 const trays = new Map<number, Tray>();
@@ -47,8 +54,26 @@ function start() {
   nativeInit(onNativeEvent, assetsDir);
 }
 
+// Requests answered by a "reply" event (dialogs, notifications, shortcut changes).
+const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+function request<T>(req: number): Promise<T> {
+  return new Promise((resolve, reject) => pending.set(req, { resolve, reject }));
+}
+
+const shortcutHandlers = new Map<string, (state: "pressed" | "released") => void>();
+
 function onNativeEvent(json: string) {
   const ev = JSON.parse(json);
+  if (ev.type === "reply") {
+    const p = pending.get(ev.req);
+    pending.delete(ev.req);
+    if (p) ev.ok ? p.resolve(ev.value) : p.reject(new Error(String(ev.value)));
+    return;
+  }
+  if (ev.type === "shortcut") {
+    shortcutHandlers.get(ev.accelerator)?.(ev.state);
+    return;
+  }
   const target = ev.tray != null ? trays.get(ev.tray) : ev.window != null ? windows.get(ev.window) : undefined;
   if (!target) {
     if (ev.type === "error" || ev.type === "warning") console.warn(`[buntauri] ${ev.message}`);
@@ -416,8 +441,152 @@ class Tray extends Emitter {
   }
 }
 
+// ── Dialogs ─────────────────────────────────────────────────────────────────
+
+type FileFilter = { name: string; extensions: string[] };
+type DialogBase = {
+  title?: string;
+  /** Folder to start in. */
+  defaultPath?: string;
+  filters?: FileFilter[];
+  /** Make the dialog modal to this window. */
+  window?: Window;
+};
+
+function showDialog<T>(spec: Record<string, unknown>, window?: Window): Promise<T> {
+  start();
+  return request<T>(nativeDialog(window && !window.closed ? window.id : undefined, JSON.stringify(spec)));
+}
+
+const dialog = {
+  /** Pick a file; `multiple` for several, `directory` for folders. Resolves to a path, paths, or null. */
+  open(options: DialogBase & { multiple?: boolean; directory?: boolean } = {}): Promise<string | string[] | null> {
+    const { window, ...spec } = options;
+    return showDialog({ kind: "open", ...spec }, window);
+  },
+  /** Choose where to save. Resolves to a path or null. */
+  save(options: DialogBase & { fileName?: string } = {}): Promise<string | null> {
+    const { window, ...spec } = options;
+    return showDialog({ kind: "save", ...spec }, window);
+  },
+  /** Message box. Resolves to "ok", "cancel", "yes" or "no". */
+  message(
+    message: string,
+    options: { title?: string; level?: "info" | "warning" | "error"; buttons?: "ok" | "okCancel" | "yesNo" | "yesNoCancel"; window?: Window } = {},
+  ): Promise<"ok" | "cancel" | "yes" | "no"> {
+    const { window, ...spec } = options;
+    return showDialog({ kind: "message", message: String(message), ...spec }, window);
+  },
+  /** OK/Cancel question. Resolves to true for OK. */
+  async confirm(message: string, options: { title?: string; level?: "info" | "warning" | "error"; window?: Window } = {}) {
+    return (await dialog.message(message, { ...options, buttons: "okCancel" })) === "ok";
+  },
+  /** Yes/No question. Resolves to true for Yes. */
+  async ask(message: string, options: { title?: string; level?: "info" | "warning" | "error"; window?: Window } = {}) {
+    return (await dialog.message(message, { ...options, buttons: "yesNo" })) === "yes";
+  },
+};
+
+// ── Notifications ───────────────────────────────────────────────────────────
+
+/** Desktop notification (a toast on Windows). `appId`: the AppUserModelID shown as sender. */
+function notify(options: { title: string; body?: string; appId?: string; icon?: string }): Promise<void> {
+  start();
+  return request<void>(nativeNotify(JSON.stringify(options)));
+}
+
+// ── Clipboard ───────────────────────────────────────────────────────────────
+
+const clipboard = {
+  /** The clipboard's text, or null when it holds no text. */
+  readText(): string | null {
+    return nativeClipboardRead();
+  },
+  writeText(text: string): void {
+    nativeClipboardWrite(String(text));
+  },
+};
+
+// ── Global shortcuts ────────────────────────────────────────────────────────
+
+const globalShortcut = {
+  /** Fire `handler` for "CmdOrCtrl+Shift+K"-style shortcuts, even when the app has no focus. */
+  async register(accelerator: string, handler: (state: "pressed" | "released") => void): Promise<void> {
+    start();
+    await request<void>(nativeShortcut(accelerator, true));
+    shortcutHandlers.set(accelerator, handler);
+  },
+  async unregister(accelerator: string): Promise<void> {
+    start();
+    shortcutHandlers.delete(accelerator);
+    await request<void>(nativeShortcut(accelerator, false));
+  },
+  isRegistered(accelerator: string): boolean {
+    return shortcutHandlers.has(accelerator);
+  },
+};
+
+// ── Single instance ─────────────────────────────────────────────────────────
+
+/**
+ * Make sure only one copy of the app runs. Resolves to null in a second copy
+ * (its arguments have been passed to the first one: quit). In the first copy
+ * it resolves to an emitter that fires "second-instance" ({ argv, cwd }).
+ * Uses a named pipe (Windows) or a socket in the temp dir; no native code.
+ */
+async function requestSingleInstance(appId: string) {
+  const safe = String(appId).replace(/[^A-Za-z0-9._-]/g, "_");
+  const path =
+    process.platform === "win32"
+      ? `\\\\.\\pipe\\buntauri-${safe}`
+      : `${tmpdir()}/buntauri-${safe}.sock`;
+
+  const handOver = () =>
+    new Promise<boolean>(resolve => {
+      const c = net.createConnection(path, () => {
+        c.end(JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }), () => resolve(true));
+      });
+      c.on("error", () => resolve(false));
+    });
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (await handOver()) return null;
+    if (process.platform !== "win32") {
+      try {
+        unlinkSync(path); // stale socket of a crashed instance
+      } catch {}
+    }
+    const instance = new Emitter();
+    const server = net.createServer(socket => {
+      let data = "";
+      socket.setEncoding("utf8");
+      socket.on("data", chunk => (data += chunk));
+      socket.on("end", () => {
+        try {
+          instance._fire("second-instance", JSON.parse(data));
+        } catch {}
+      });
+    });
+    const listening = await new Promise<boolean>(resolve => {
+      server.once("error", () => resolve(false));
+      server.listen(path, () => resolve(true));
+    });
+    if (listening) {
+      server.unref(); // the app's windows/trays decide how long it lives
+      return Object.assign(instance, { release: () => server.close() });
+    }
+    // Lost a race with another first instance: hand over to it instead.
+  }
+  return null;
+}
+
 export default {
   Window,
   Tray,
   setAssetsDir,
+  dialog,
+  notify,
+  clipboard,
+  globalShortcut,
+  requestSingleInstance,
 };

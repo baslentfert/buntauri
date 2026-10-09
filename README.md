@@ -38,6 +38,15 @@ cd examples/dashboard && bun install
 bun build --compile --windows-hide-console app.ts assets/index.html --outfile SystemPulse.exe
 ```
 
+**[examples/native](examples/native)**: dialogs, notifications, clipboard, global shortcuts and single instance:
+
+```ts
+import { dialog, notify, clipboard, globalShortcut, requestSingleInstance } from "bun:buntauri";
+const files = await dialog.open({ multiple: true, window: win });
+await notify({ title: "Done", body: "Export finished" });
+await globalShortcut.register("CmdOrCtrl+Shift+B", () => win.focus());
+```
+
 **[examples/game](examples/game)**: *Bun Catcher*, a PixiJS 8 arcade game (vector graphics, particles, screen shake, 60 fps WebGL). Catch burgers, dodge bombs; Bun keeps the high score on disk. Same build command, `--outfile BunCatcher.exe`.
 
 ## Try the window layer

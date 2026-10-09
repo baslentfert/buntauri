@@ -58,6 +58,19 @@ fn main() {
     });
     let tray_id = ui.create_tray_json(&tray.to_string()).expect("tray");
     let mut problems = 0;
+    if selftest {
+        // Global shortcut: register + unregister must both answer ok.
+        ui.shortcut("CmdOrCtrl+Alt+Shift+F11", true).unwrap();
+        ui.shortcut("CmdOrCtrl+Alt+Shift+F11", false).unwrap();
+        // Clipboard round trip, restoring what was there.
+        let saved = buntauri_window::clipboard_read_text().unwrap_or(None);
+        buntauri_window::clipboard_write_text("buntauri clipboard test").unwrap();
+        let back = buntauri_window::clipboard_read_text().unwrap();
+        println!("[host] clipboard round trip: {}", back.as_deref() == Some("buntauri clipboard test"));
+        if let Some(t) = saved {
+            buntauri_window::clipboard_write_text(&t).unwrap();
+        }
+    }
     // Selftest phase 2: after the IPC round trip, resize and check the state.
     let mut resize_check = false;
     open += 1;
@@ -127,6 +140,13 @@ fn main() {
                     ui.close(window);
                 }
             }
+            HostEvent::Reply { req, ok, value } => {
+                println!("[host] reply #{req} ok={ok} {value}");
+                if !ok {
+                    problems += 1;
+                }
+            }
+            HostEvent::Shortcut { accelerator, state } => println!("[host] shortcut {accelerator} {state}"),
             HostEvent::Tray { tray, kind, button, .. } => println!("[host] tray {tray} {kind} {button}"),
             HostEvent::TrayFailed { tray, message } => {
                 problems += 1;

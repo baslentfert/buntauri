@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>buntauri native extras</title>
+  <style>
+    body { font: 15px system-ui, sans-serif; margin: 2rem; background: #111; color: #eee; }
+    h1 { margin-top: 0; }
+    section { margin-bottom: 1rem; }
+    button { font: inherit; padding: .4rem .8rem; margin: .2rem; }
+    input { font: inherit; padding: .35rem; width: 16rem; }
+    pre { background: #222; padding: 1rem; border-radius: 6px; min-height: 8rem; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Native extras</h1>
+  <section>
+    Dialogs:
+    <button data-cmd="open">open files</button>
+    <button data-cmd="openFolder">pick folder</button>
+    <button data-cmd="save">save as</button>
+    <button data-cmd="message">message</button>
+    <button data-cmd="confirm">confirm</button>
+  </section>
+  <section>Notification: <button data-cmd="notify">show toast</button></section>
+  <section>
+    Clipboard: <input id="text" value="Hello from buntauri">
+    <button id="copy">copy</button> <button data-cmd="paste">paste</button>
+  </section>
+  <section>Global shortcut: <button data-cmd="shortcut">toggle Ctrl+Shift+B</button></section>
+  <section>Single instance: start the app a second time; this window comes to the front.</section>
+  <pre id="out"></pre>
+  <script>
+    const { invoke, listen } = window.__BUNTAURI__;
+    const out = document.getElementById("out");
+    const log = (s) => (out.textContent += s + "\n");
+    listen("log", log);
+    const run = (cmd, args) =>
+      invoke(cmd, args).then((v) => log(`${cmd}: ${JSON.stringify(v)}`), (e) => log(`${cmd} failed: ${e.message}`));
+    for (const b of document.querySelectorAll("[data-cmd]")) b.onclick = () => run(b.dataset.cmd);
+    document.getElementById("copy").onclick = () => run("copy", { text: document.getElementById("text").value });
+  </script>
+</body>
+</html>

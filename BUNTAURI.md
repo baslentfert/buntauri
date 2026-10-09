@@ -89,11 +89,11 @@ What is left is the native shell around the window:
 - [x] Menus: window menu bar and context menus (`muda` 0.21), accelerators on Windows
 - [x] Window control at runtime: minimize, maximize, show/hide, size, position, focus,
       always-on-top, fullscreen, plus resize/move/focus events and `preventClose` (tao)
-- [ ] Native dialogs: open/save file, folder picker, message box (`rfd`)
-- [ ] Notifications (Windows toasts)
-- [ ] Global shortcuts (`global-hotkey`)
-- [ ] Clipboard text (`arboard`)
-- [ ] Single instance (named mutex, forward args to the running app)
+- [x] Native dialogs: open/save file, folder picker, message box (`rfd`): `dialog.*`
+- [x] Notifications (Windows toasts, `notify-rust`): `notify()`
+- [x] Global shortcuts (`global-hotkey`): `globalShortcut.register()`
+- [x] Clipboard text (`arboard`): `clipboard.readText()/writeText()`
+- [x] Single instance: `requestSingleInstance()`, a named pipe / socket in TS, no native code
 - [ ] Deep links / custom URL scheme (registry)
 - [ ] `@tauri-apps/api` compatibility layer (`invoke`, events)
 - [ ] CSP headers on `app://`

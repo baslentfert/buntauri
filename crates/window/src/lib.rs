@@ -9,7 +9,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -21,9 +21,11 @@ use wry::http::{header::CONTENT_TYPE, Request, Response};
 use wry::{DragDropEvent, WebContext, WebView, WebViewBuilder};
 
 mod control;
+mod extras;
 mod native;
 mod options;
 pub use control::WindowOp;
+pub use extras::{clipboard_read_text, clipboard_write_text, DialogSpec, NotificationSpec};
 pub use native::{decode_base64, decode_png, MenuItemSpec, Owner, TraySpec};
 pub use options::{BackgroundThrottling, Color, IpcPolicy, PreventOverflow, ScrollBarStyle, Theme, WindowOptions};
 
@@ -75,6 +77,11 @@ pub enum HostEvent {
     Tray { tray: TrayId, kind: &'static str, button: &'static str, x: f64, y: f64 },
     /// The tray icon could not be created.
     TrayFailed { tray: TrayId, message: String },
+    /// Answer to a request (dialog, notification, shortcut registration):
+    /// `value` on success, an error message (as `value`) otherwise.
+    Reply { req: u64, ok: bool, value: serde_json::Value },
+    /// A registered global shortcut fired. `state`: `pressed` or `released`.
+    Shortcut { accelerator: String, state: &'static str },
     /// The UI thread's event loop has stopped.
     Exited,
 }
@@ -90,7 +97,11 @@ impl HostEvent {
             | HostEvent::Window { window, .. }
             | HostEvent::CreateFailed { window, .. } => Some(*window),
             HostEvent::Error { window, .. } | HostEvent::Warning { window, .. } | HostEvent::Menu { window, .. } => *window,
-            HostEvent::Tray { .. } | HostEvent::TrayFailed { .. } | HostEvent::Exited => None,
+            HostEvent::Tray { .. }
+            | HostEvent::TrayFailed { .. }
+            | HostEvent::Reply { .. }
+            | HostEvent::Shortcut { .. }
+            | HostEvent::Exited => None,
         }
     }
 
@@ -102,6 +113,11 @@ impl HostEvent {
             HostEvent::Menu { window, tray, .. } => window.or(*tray),
             _ => self.window(),
         }
+    }
+
+    /// A pending request is answered by this event.
+    pub fn ends_request(&self) -> bool {
+        matches!(self, HostEvent::Reply { .. })
     }
 
     /// The window or tray is gone after this event (closed or never created).
@@ -135,6 +151,10 @@ impl HostEvent {
                 json!({ "type": "tray", "tray": tray, "kind": kind, "button": button, "x": x, "y": y })
             }
             HostEvent::TrayFailed { tray, message } => json!({ "type": "trayfailed", "tray": tray, "message": message }),
+            HostEvent::Reply { req, ok, value } => json!({ "type": "reply", "req": req, "ok": ok, "value": value }),
+            HostEvent::Shortcut { accelerator, state } => {
+                json!({ "type": "shortcut", "accelerator": accelerator, "state": state })
+            }
             HostEvent::Exited => json!({ "type": "exited" }),
         };
         v.to_string()
@@ -189,6 +209,9 @@ enum Command {
     TrayCreate(TrayId, TraySpec, Option<Rgba>),
     TrayUpdate(TrayId, TraySpec, Option<Rgba>),
     TrayRemove(TrayId),
+    Dialog(u64, Option<WindowId>, DialogSpec),
+    Notify(u64, NotificationSpec),
+    Shortcut(u64, bool, String),
     Shutdown,
 }
 
@@ -197,6 +220,7 @@ pub struct UiThread {
     proxy: EventLoopProxy<Command>,
     states: States,
     next_id: AtomicU32,
+    next_req: AtomicU64,
     join: Option<JoinHandle<()>>,
 }
 
@@ -214,7 +238,7 @@ impl UiThread {
         let proxy = rx
             .recv()
             .map_err(|_| std::io::Error::other("UI thread failed to start"))?;
-        Ok(Self { proxy, states, next_id: AtomicU32::new(1), join: Some(join) })
+        Ok(Self { proxy, states, next_id: AtomicU32::new(1), next_req: AtomicU64::new(1), join: Some(join) })
     }
 
     pub fn create_window(&self, opts: WindowOptions) -> WindowId {
@@ -250,6 +274,32 @@ impl UiThread {
     /// after it closed). Updated by the UI thread after every change.
     pub fn window_state_json(&self, window: WindowId) -> String {
         self.states.lock().unwrap().get(&window).map_or_else(|| "null".into(), |v| v.to_string())
+    }
+
+    /// Show a dialog ([`DialogSpec`] as JSON), modal to `window` if given.
+    /// Returns the request id; the answer comes as [`HostEvent::Reply`].
+    pub fn dialog_json(&self, window: Option<WindowId>, json: &str) -> Result<u64, String> {
+        let spec = DialogSpec::from_json(json)?;
+        let req = self.next_req.fetch_add(1, Ordering::Relaxed);
+        self.send(Command::Dialog(req, window, spec));
+        Ok(req)
+    }
+
+    /// Show a desktop notification ([`NotificationSpec`] as JSON). Answered by a Reply.
+    pub fn notify_json(&self, json: &str) -> Result<u64, String> {
+        let spec = NotificationSpec::from_json(json)?;
+        let req = self.next_req.fetch_add(1, Ordering::Relaxed);
+        self.send(Command::Notify(req, spec));
+        Ok(req)
+    }
+
+    /// Register (or unregister) a global shortcut like "CmdOrCtrl+Shift+K".
+    /// Answered by a Reply (fails if another app holds the shortcut).
+    pub fn shortcut(&self, accelerator: &str, register: bool) -> Result<u64, String> {
+        extras::parse_shortcut(accelerator)?;
+        let req = self.next_req.fetch_add(1, Ordering::Relaxed);
+        self.send(Command::Shortcut(req, register, accelerator.to_string()));
+        Ok(req)
     }
 
     /// Window icon (title bar + taskbar) from a base64 PNG.
@@ -399,6 +449,22 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
     let mut windows: HashMap<WindowId, Entry> = HashMap::new();
     let mut by_native: HashMap<tao::window::WindowId, WindowId> = HashMap::new();
     let mut trays: HashMap<TrayId, tray_icon::TrayIcon> = HashMap::new();
+    // Global shortcuts: the manager lives on this thread (it needs its message
+    // loop on Windows); the handler maps hotkey ids back to accelerators.
+    let mut hotkeys: Option<global_hotkey::GlobalHotKeyManager> = None;
+    let shortcut_names: Arc<Mutex<HashMap<u32, String>>> = Default::default();
+    {
+        let emit = emit.clone();
+        let names = shortcut_names.clone();
+        global_hotkey::GlobalHotKeyEvent::set_event_handler(Some(move |e: global_hotkey::GlobalHotKeyEvent| {
+            let Some(accelerator) = names.lock().unwrap().get(&e.id).cloned() else { return };
+            let state = match e.state {
+                global_hotkey::HotKeyState::Pressed => "pressed",
+                global_hotkey::HotKeyState::Released => "released",
+            };
+            emit(HostEvent::Shortcut { accelerator, state });
+        }));
+    }
 
     // One global handler each (muda/tray-icon allow only one): route by the
     // owner prefix in the menu id, and by tray id.
@@ -522,6 +588,59 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
                 }
                 Command::TrayRemove(id) => {
                     trays.remove(&id);
+                }
+                Command::Dialog(req, window, spec) => {
+                    #[allow(unused_mut)]
+                    let mut parent = None;
+                    #[cfg(target_os = "windows")]
+                    if let Some(e) = window.and_then(|w| windows.get(&w)) {
+                        use tao::platform::windows::WindowExtWindows;
+                        parent = Some(extras::Parent(e.window.hwnd()));
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    let _ = window;
+                    // Dialogs block until answered: run them off this thread.
+                    let reply = emit.clone();
+                    let spawned = std::thread::Builder::new().name("buntauri-dialog".into()).spawn(move || {
+                        let value = extras::run_dialog(&spec, parent);
+                        reply(HostEvent::Reply { req, ok: true, value });
+                    });
+                    if let Err(e) = spawned {
+                        emit(HostEvent::Reply { req, ok: false, value: e.to_string().into() });
+                    }
+                }
+                Command::Notify(req, spec) => {
+                    let reply = emit.clone();
+                    let spawned = std::thread::Builder::new().name("buntauri-notify".into()).spawn(move || {
+                        match extras::notify(&spec) {
+                            Ok(()) => reply(HostEvent::Reply { req, ok: true, value: serde_json::Value::Null }),
+                            Err(e) => reply(HostEvent::Reply { req, ok: false, value: e.into() }),
+                        }
+                    });
+                    if let Err(e) = spawned {
+                        emit(HostEvent::Reply { req, ok: false, value: e.to_string().into() });
+                    }
+                }
+                Command::Shortcut(req, register, accelerator) => {
+                    let result = (|| -> Result<(), String> {
+                        let hotkey = extras::parse_shortcut(&accelerator)?;
+                        if hotkeys.is_none() {
+                            hotkeys = Some(global_hotkey::GlobalHotKeyManager::new().map_err(|e| e.to_string())?);
+                        }
+                        let manager = hotkeys.as_ref().unwrap();
+                        if register {
+                            manager.register(hotkey).map_err(|e| e.to_string())?;
+                            shortcut_names.lock().unwrap().insert(hotkey.id(), accelerator.clone());
+                        } else {
+                            manager.unregister(hotkey).map_err(|e| e.to_string())?;
+                            shortcut_names.lock().unwrap().remove(&hotkey.id());
+                        }
+                        Ok(())
+                    })();
+                    emit(match result {
+                        Ok(()) => HostEvent::Reply { req, ok: true, value: serde_json::Value::Null },
+                        Err(e) => HostEvent::Reply { req, ok: false, value: e.into() },
+                    });
                 }
                 Command::Shutdown => {
                     trays.clear();

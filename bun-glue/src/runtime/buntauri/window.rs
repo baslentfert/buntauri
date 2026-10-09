@@ -21,6 +21,9 @@ struct State {
     callback: Strong,
     /// Windows and trays that keep the event loop alive (they share one id space).
     alive: HashSet<u32>,
+    /// Requests (dialogs, notifications, shortcut changes) awaiting a Reply;
+    /// each keeps the event loop alive until answered.
+    pending: u32,
 }
 
 // JS-thread only (host functions and `deliver`).
@@ -96,6 +99,8 @@ pub(crate) struct WindowEvent {
     owner: Option<u32>,
     /// The window/tray is gone (closed, or never created): release its keep-alive.
     ends_owner: bool,
+    /// Answers a request: release that request's keep-alive.
+    ends_request: bool,
     json: String,
 }
 
@@ -119,6 +124,10 @@ impl WindowEvent {
                 release(global, s, id);
             }
         }
+        if self.ends_request && s.pending > 0 {
+            s.pending -= 1;
+            global.bun_vm().event_loop_mut().unref_keep_alive();
+        }
         let arg = create_utf8_for_js(global, self.json.as_bytes())?;
         global
             .bun_vm()
@@ -130,7 +139,7 @@ impl WindowEvent {
 
 /// UI thread: hand an event to the JS thread.
 fn post(vm: &bun_jsc::VmHandle, ev: HostEvent) {
-    let event = WindowEvent { owner: ev.owner(), ends_owner: ev.ends_owner(), json: ev.to_json() };
+    let event = WindowEvent { owner: ev.owner(), ends_owner: ev.ends_owner(), ends_request: ev.ends_request(), json: ev.to_json() };
     let payload = bun_core::heap::into_raw(Box::new(event));
     let task = ConcurrentTask::create(Task::init(payload));
     if let bun_jsc::vm_handle::Posted::Refused(task) = vm.post(bun_jsc::LoopKind::Regular, task) {
@@ -153,6 +162,15 @@ fn release(global: &JSGlobalObject, s: &mut State, id: u32) {
     if s.alive.remove(&id) {
         global.bun_vm().event_loop_mut().unref_keep_alive();
     }
+}
+
+/// A request was sent: keep the loop alive until its Reply arrives.
+fn hold_request(global: &JSGlobalObject, req: u64) -> JSValue {
+    if let Some(s) = state() {
+        s.pending += 1;
+        global.bun_vm().event_loop_mut().ref_keep_alive();
+    }
+    JSValue::js_number(req as f64)
 }
 
 fn string_arg(global: &JSGlobalObject, v: JSValue, name: &str) -> JsResult<String> {
@@ -189,7 +207,7 @@ pub(crate) fn init(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSVal
         .map_err(|e| global.throw(format_args!("failed to start UI thread: {e}")))?;
     // SAFETY: JS thread; see `state`.
     unsafe {
-        *STATE.get() = Some(State { ui, callback: Strong::create(callback, global), alive: HashSet::new() });
+        *STATE.get() = Some(State { ui, callback: Strong::create(callback, global), alive: HashSet::new(), pending: 0 });
     }
     Ok(JSValue::UNDEFINED)
 }
@@ -225,6 +243,57 @@ pub(crate) fn window_state(global: &JSGlobalObject, frame: &CallFrame) -> JsResu
     let id = id_arg(global, frame.argument(0))?;
     let json = ui(global)?.window_state_json(id);
     create_utf8_for_js(global, json.as_bytes())
+}
+
+/// `dialog(windowId | undefined, specJson) -> req`: open/save/message dialog.
+#[bun_jsc::host_fn]
+pub(crate) fn dialog(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+    let [id, json] = frame.arguments_as_array::<2>();
+    let window = if id.is_number() { Some(id_arg(global, id)?) } else { None };
+    let json = string_arg(global, json, "dialog")?;
+    let req = ui(global)?
+        .dialog_json(window, &json)
+        .map_err(|e| global.throw_type_error(format_args!("{e}")))?;
+    Ok(hold_request(global, req))
+}
+
+/// `notify(specJson) -> req`: desktop notification.
+#[bun_jsc::host_fn]
+pub(crate) fn notify(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+    let json = string_arg(global, frame.argument(0), "notification")?;
+    let req = ui(global)?
+        .notify_json(&json)
+        .map_err(|e| global.throw_type_error(format_args!("{e}")))?;
+    Ok(hold_request(global, req))
+}
+
+/// `shortcut(accelerator, register) -> req`: (un)register a global shortcut.
+#[bun_jsc::host_fn]
+pub(crate) fn shortcut(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+    let [accel, register] = frame.arguments_as_array::<2>();
+    let accel = string_arg(global, accel, "shortcut")?;
+    let req = ui(global)?
+        .shortcut(&accel, register.to_boolean())
+        .map_err(|e| global.throw_type_error(format_args!("{e}")))?;
+    Ok(hold_request(global, req))
+}
+
+/// `clipboardRead() -> string | null`. Needs no UI thread.
+#[bun_jsc::host_fn]
+pub(crate) fn clipboard_read(global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {
+    match buntauri_window::clipboard_read_text() {
+        Ok(Some(text)) => create_utf8_for_js(global, text.as_bytes()),
+        Ok(None) => Ok(JSValue::NULL),
+        Err(e) => Err(global.throw(format_args!("clipboard: {e}"))),
+    }
+}
+
+/// `clipboardWrite(text)`
+#[bun_jsc::host_fn]
+pub(crate) fn clipboard_write(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+    let text = string_arg(global, frame.argument(0), "text")?;
+    buntauri_window::clipboard_write_text(&text).map_err(|e| global.throw(format_args!("clipboard: {e}")))?;
+    Ok(JSValue::UNDEFINED)
 }
 
 /// `setIcon(id, pngBase64)`
