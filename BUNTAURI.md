@@ -144,7 +144,12 @@ What is left is the native shell around the window:
       `bun:buntauri` loads). Windows cannot open yet: AppKit needs the process main thread, so the
       UI host subprocess comes next (mac-buntauri, branch `macos`). Every bun start on macOS loads
       AppKit/WebKit (no delay-load on macOS); revisit with the UI host design.
-- [ ] Linux: builds in CI up to the final link; link still fails (being diagnosed).
+- [x] Linux: Bun + buntauri builds in CI (Ubuntu 24.04 x64, release, `--lto=off`). bun's NEEDED is
+      only libc, ld-linux and libm: GTK/WebKitGTK are linked through Implib.so stubs generated at
+      configure time (javascriptcoregtk: `jsc_*` only; zlib left out, bun has its own). Windows run in
+      a UI host subprocess, as on macOS, so GTK/WebKitGTK and their JavaScriptCore never load in the
+      bun process. The xvfb window test (examples/bun/hello.ts) passes. Needs WebKitGTK 4.1 at run
+      time (Ubuntu 22.04+ / Debian 12+); without it `new Window` throws, `bun` itself still runs.
 - [ ] CI (GitHub Actions): `build-macos.yml` (manual, macOS arm64) is the first step; build buntauri per platform, publish base executables; sign + notarize
       macOS (Developer ID Application, App Store Connect API key as secrets)
 - [ ] App manifest (comctl32 v6 + DPI awareness); then re-enable muda `common-controls-v6`
