@@ -31,6 +31,13 @@ bun build --compile --windows-hide-console app.ts assets/index.html --outfile My
 Building Bun with buntauri (Windows): `bun scripts/sync.ts ../bun` then `pwsh scripts/build-bun.ps1`.
 See [examples/bun](examples/bun) and [BUNTAURI.md](BUNTAURI.md).
 
+**[examples/dashboard](examples/dashboard)**: *System Pulse*, a React 19 dashboard where every number comes from Bun: live CPU per core and memory pushed every second, history in `bun:sqlite`, disks, network, GPU, top processes via `Bun.$`, and a native speed test (`Bun.CryptoHasher`, `Bun.hash`, `Bun.gzipSync`). One ~98 MB exe:
+
+```sh
+cd examples/dashboard && bun install
+bun build --compile --windows-hide-console app.ts assets/index.html --outfile SystemPulse.exe
+```
+
 ## Try the window layer
 
 ```sh
