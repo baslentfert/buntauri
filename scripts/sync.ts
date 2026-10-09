@@ -167,7 +167,8 @@ const edits: Edit[] = [
     file: "scripts/build/binary-expectations.ts",
     anchor: /"ole32\.dll",\n\s*\],\n\s*exact: true,[\s\S]*?allowed: \[\.\.\.sanitizerLibs,/,
     replace: m => m + ` ...${JSON.stringify(WINDOWS_UI_DLLS)} /* ${MARK} */,`,
-    present: `/* ${MARK} */`,
+    // Specific: the macOS edit below also writes a `/* buntauri */` marker in this file.
+    present: `...${JSON.stringify(WINDOWS_UI_DLLS)} /* ${MARK} */`,
   },
   {
     file: "scripts/build/flags.ts",

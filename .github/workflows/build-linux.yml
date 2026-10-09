@@ -86,7 +86,7 @@ jobs:
       - name: Smoke test
         working-directory: bun
         run: |
-          exe=build/${{ inputs.profile }}/bun$([ "${{ inputs.profile }}" = debug ] && echo -debug)
+          exe=build/${{ inputs.profile }}/bun${{ inputs.profile == 'debug' && '-debug' || '' }}
           "$exe" --revision
           "$exe" -e 'const m = await import("bun:buntauri"); console.log("bun:buntauri exports:", Object.keys(m.default ?? m))'
 
