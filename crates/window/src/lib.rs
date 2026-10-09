@@ -393,6 +393,8 @@ impl UiThread {
         let backend = Backend::Host(host::Client::spawn(Arc::new(on_event), assets.host_spec(), states.clone())?);
         #[cfg(not(target_os = "macos"))]
         let backend = {
+            #[cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
+            load_gtk().map_err(std::io::Error::other)?;
             let (tx, rx) = mpsc::channel();
             let ui_states = states.clone();
             let on_state: StateSink = Arc::new(move |id, state| {
@@ -574,6 +576,34 @@ impl UiThread {
             Backend::Host(client) => client.send(&cmd),
         }
     }
+}
+
+/// Linux/BSD: GTK and WebKitGTK may be linked through lazy-loading stubs
+/// (no NEEDED entries, so the host binary starts without them). Load them up
+/// front: a missing library is then an error here, not an abort on the
+/// first GTK call. With normal linking they are already loaded.
+#[cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
+fn load_gtk() -> Result<(), String> {
+    use std::ffi::{c_char, c_int, c_void, CStr};
+    unsafe extern "C" {
+        fn dlopen(file: *const c_char, mode: c_int) -> *mut c_void;
+        fn dlerror() -> *mut c_char;
+    }
+    const RTLD_LAZY: c_int = 0x1;
+    const RTLD_GLOBAL: c_int = 0x100;
+    // WebKitGTK pulls in GTK 3, GLib, libsoup and its JavaScriptCore.
+    for lib in [c"libwebkit2gtk-4.1.so.0", c"libgtk-3.so.0"] {
+        // SAFETY: plain dlopen of a library name; the handle is kept (never closed).
+        if unsafe { dlopen(lib.as_ptr(), RTLD_LAZY | RTLD_GLOBAL) }.is_null() {
+            // SAFETY: dlerror returns a valid C string right after a failed dlopen.
+            let why = unsafe { CStr::from_ptr(dlerror()) }.to_string_lossy();
+            return Err(format!(
+                "cannot open windows: {} is not available ({why}). Install WebKitGTK 4.1, e.g. `apt install libwebkit2gtk-4.1-0`.",
+                lib.to_string_lossy()
+            ));
+        }
+    }
+    Ok(())
 }
 
 type Emit = Arc<dyn Fn(HostEvent) + Send + Sync>;
