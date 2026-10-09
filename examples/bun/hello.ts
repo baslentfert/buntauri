@@ -24,8 +24,10 @@ win.handle("slow", async () => {
 win.handle("fail", () => {
   throw new Error("expres fout");
 });
-win.handle("done", result => {
+win.handle("done", async result => {
   console.log("selftest:", JSON.stringify(result));
+  // With --windows-hide-console there is no console to read: write it to a file instead.
+  if (process.env.BUNTAURI_SELFTEST_OUT) await Bun.write(process.env.BUNTAURI_SELFTEST_OUT, JSON.stringify(result));
   win.close();
 });
 

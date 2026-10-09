@@ -21,8 +21,10 @@ win.on("closed", () => console.log("bye"));          // Bun exits when the last 
 One exe (frontend + Bun backend, nothing next to it):
 
 ```sh
-bun build --compile app.ts assets/index.html --outfile MyApp.exe
+bun build --compile --windows-hide-console app.ts assets/index.html --outfile MyApp.exe
 ```
+
+`--windows-hide-console` makes it a GUI app: no console window next to yours.
 
 `setAssetsDir(import.meta.dir + "/assets")` works both with `bun run` (disk) and inside the exe (served zero-copy from the executable).
 
