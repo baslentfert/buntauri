@@ -68,7 +68,7 @@ Same names and defaults as Tauri's `WindowConfig` (`tauri.conf.json`), so a Taur
 ## Design
 
 Everything lives outside the Bun tree so new Bun releases can be picked up with a small patch set.
-See [BUNTAURI.md](BUNTAURI.md) (Dutch) for the layout, rules and roadmap.
+See [BUNTAURI.md](BUNTAURI.md) for the layout, rules and roadmap.
 
 ## License
 
