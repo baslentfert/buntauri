@@ -8,8 +8,10 @@ on:
       profile:
         description: "Bun build profile"
         type: choice
-        options: [debug, release]
-        default: debug
+        # release: Bun's Unix debug builds use -Werror for unused code, which
+        # trips over upstream Bun itself at times; release does not.
+        options: [release, debug]
+        default: release
 
 jobs:
   build:
