@@ -2,13 +2,13 @@
 //! (`{"op": "hide"}`, `{"op": "setSize", "width": 800, "height": 600}`), and
 //! a snapshot of the window's state the host can read without a round trip.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tao::dpi::{LogicalPosition, LogicalSize};
 use tao::window::{Fullscreen, Window};
 
 /// A window operation. Sizes and positions are logical (CSS) pixels.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum WindowOp {
     Show,

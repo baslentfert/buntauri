@@ -27,6 +27,9 @@ impl AssetProvider for Embedded {
 }
 
 fn main() {
+    // macOS: this same executable is also the UI host process.
+    buntauri_window::run_ui_host_if_requested(|_| Arc::new(Embedded));
+
     let (tx, rx) = mpsc::channel();
     let ui = UiThread::spawn(move |ev| { let _ = tx.send(ev); }, Arc::new(Embedded)).expect("spawn UI thread");
 
@@ -61,11 +64,26 @@ fn main() {
     // Selftest phase 2: after the IPC round trip, resize and check the state.
     let mut resize_check = false;
     open += 1;
+    // Selftest windows: a page that must NOT be able to invoke, and inline
+    // HTML (set by the host, so trusted) that must.
+    let mut untrusted = None;
+    let mut inline_ok = !selftest;
     if selftest {
-        // A page outside app:// must NOT be able to invoke.
-        let w = ui.create_window(WindowOptions { label: "untrusted".into(), title: "untrusted".into(), url: Some("data:text/html,<p>untrusted</p>".into()), ..Default::default() });
-        ui.eval(w, "window.__BUNTAURI__.invoke('greet', {name: 'evil'})");
-        open += 1;
+        // The page tries it itself on load (an eval right after create can run
+        // before the page has loaded, e.g. on macOS, and then proves nothing).
+        // Percent-encoded: macOS (NSURL) refuses raw `<`, `>` and spaces in a URL.
+        // On Windows this ends in "ipc blocked"; on macOS wry already drops IPC
+        // from data: pages, so nothing arrives and the window closes at the end.
+        let html = "<p>untrusted</p><script>window.__BUNTAURI__.invoke('greet', {name: 'evil'})</script>";
+        let page = format!("data:text/html,{}", html.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect::<String>());
+        untrusted = Some(ui.create_window(WindowOptions { label: "untrusted".into(), title: "untrusted".into(), url: Some(page), ..Default::default() }));
+        ui.create_window(WindowOptions {
+            label: "inline".into(),
+            title: "inline".into(),
+            html: Some("<p>inline</p><script>window.__BUNTAURI__.invoke('inline')</script>".into()),
+            ..Default::default()
+        });
+        open += 2;
     }
 
     // The "JS thread" event loop.
@@ -96,8 +114,14 @@ fn main() {
                         }
                         ui.resolve(window, call, "null");
                     }
+                    "inline" => {
+                        inline_ok = true;
+                        ui.resolve(window, call, "null");
+                        ui.close(window);
+                    }
                     "done" => {
                         println!("[host] selftest result: {args}");
+                        println!("[host] inline html can invoke: {inline_ok}");
                         println!("[host] native problems: {problems}");
                         ui.remove_tray(tray_id);
                         resize_check = true;
@@ -125,6 +149,9 @@ fn main() {
                     println!("[host] state after setSize: {}x{} visible={}", state["width"], state["height"], state["visible"]);
                     resize_check = false;
                     ui.close(window);
+                    if let Some(u) = untrusted.take() {
+                        ui.close(u);
+                    }
                 }
             }
             HostEvent::Tray { tray, kind, button, .. } => println!("[host] tray {tray} {kind} {button}"),
