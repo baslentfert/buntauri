@@ -1,0 +1,80 @@
+# Build Bun with buntauri on Linux (Ubuntu, x64).
+# Manual for now: Actions > "Build Linux" > Run workflow.
+name: Build Linux
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Bun build profile"
+        type: choice
+        options: [debug, release]
+        default: debug
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Free disk space
+        # Bun needs a lot of room; drop big preinstalled toolchains we don't use.
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - uses: actions/checkout@v4
+        with:
+          path: buntauri
+
+      - name: Check out Bun at UPSTREAM
+        run: |
+          sha=$(head -n1 buntauri/UPSTREAM)
+          mkdir bun && cd bun
+          git init -q && git remote add origin https://github.com/oven-sh/bun.git
+          git fetch --depth 1 origin "$sha" && git checkout -q FETCH_HEAD
+          git log -1 --oneline
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Tooling
+        run: |
+          sudo apt-get update
+          # Bun's documented build dependencies.
+          sudo apt-get install -y curl wget lsb-release software-properties-common cmake git golang libtool \
+            ninja-build pkg-config ruby-full xz-utils ccache
+          # tao/wry/tray-icon: GTK 3, WebKitGTK 4.1, appindicator for the tray.
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
+          wget -q https://apt.llvm.org/llvm.sh -O - | sudo bash -s -- 23 all
+          which clang-23
+
+      - name: Window crate tests
+        working-directory: buntauri
+        run: cargo test
+
+      - name: Apply buntauri to Bun
+        run: bun buntauri/scripts/sync.ts bun
+
+      - name: Build Bun (${{ inputs.profile }})
+        working-directory: bun
+        run: bun run build:${{ inputs.profile }}
+
+      - name: Disk space after
+        if: always()
+        run: df -h /
+
+      - name: Smoke test
+        working-directory: bun
+        run: |
+          exe=build/${{ inputs.profile }}/bun$([ "${{ inputs.profile }}" = debug ] && echo -debug)
+          "$exe" --revision
+          "$exe" -e 'const m = await import("bun:buntauri"); console.log("bun:buntauri exports:", Object.keys(m.default ?? m))'
+
+      - name: Upload Bun
+        uses: actions/upload-artifact@v4
+        with:
+          name: bun-buntauri-linux-x64-${{ inputs.profile }}
+          path: bun/build/${{ inputs.profile }}/bun*
+          if-no-files-found: warn
+          retention-days: 7
