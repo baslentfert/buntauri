@@ -208,6 +208,25 @@ pub(crate) fn create_window(global: &JSGlobalObject, frame: &CallFrame) -> JsRes
     Ok(JSValue::js_number(id as f64))
 }
 
+/// `windowOp(id, opJson)`: show, hide, setSize, ... (see `WindowOp`).
+#[bun_jsc::host_fn]
+pub(crate) fn window_op(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+    let [id, json] = frame.arguments_as_array::<2>();
+    let json = string_arg(global, json, "operation")?;
+    ui(global)?
+        .window_op_json(id_arg(global, id)?, &json)
+        .map_err(|e| global.throw_type_error(format_args!("{e}")))?;
+    Ok(JSValue::UNDEFINED)
+}
+
+/// `windowState(id) -> json`: the last known state, without a round trip.
+#[bun_jsc::host_fn]
+pub(crate) fn window_state(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+    let id = id_arg(global, frame.argument(0))?;
+    let json = ui(global)?.window_state_json(id);
+    create_utf8_for_js(global, json.as_bytes())
+}
+
 /// `setIcon(id, pngBase64)`
 #[bun_jsc::host_fn]
 pub(crate) fn set_icon(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {

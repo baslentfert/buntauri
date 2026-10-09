@@ -98,6 +98,9 @@ pub struct WindowOptions {
     pub icon: Option<String>,
     /// buntauri extra: menu bar (see `MenuItemSpec`).
     pub menu: Option<Vec<crate::MenuItemSpec>>,
+    /// buntauri extra: the close button emits `closerequested` instead of
+    /// closing (e.g. to hide to the tray). Can be changed at run time.
+    pub prevent_close: bool,
 
     /// Everything else (unknown keys and options not applied on this platform).
     #[serde(flatten)]
@@ -160,6 +163,7 @@ impl Default for WindowOptions {
             ipc: IpcPolicy::default(),
             icon: None,
             menu: None,
+            prevent_close: false,
             other: serde_json::Map::new(),
         }
     }

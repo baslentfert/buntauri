@@ -58,6 +58,8 @@ fn main() {
     });
     let tray_id = ui.create_tray_json(&tray.to_string()).expect("tray");
     let mut problems = 0;
+    // Selftest phase 2: after the IPC round trip, resize and check the state.
+    let mut resize_check = false;
     open += 1;
     if selftest {
         // A page outside app:// must NOT be able to invoke.
@@ -98,8 +100,9 @@ fn main() {
                         println!("[host] selftest result: {args}");
                         println!("[host] native problems: {problems}");
                         ui.remove_tray(tray_id);
+                        resize_check = true;
+                        ui.window_op_json(window, r#"{"op":"setSize","width":700,"height":500}"#).unwrap();
                         ui.resolve(window, call, "null");
-                        ui.close(window);
                     }
                     other => ui.reject(window, call, &format!("unknown command: {other}")),
                 }
@@ -113,6 +116,15 @@ fn main() {
                         ui.close(main_window);
                     }
                     _ => {}
+                }
+            }
+            HostEvent::Window { window, kind, data } => {
+                println!("[host] window {window} {kind} {data}");
+                if resize_check && kind == "resized" {
+                    let state: serde_json::Value = serde_json::from_str(&ui.window_state_json(window)).unwrap();
+                    println!("[host] state after setSize: {}x{} visible={}", state["width"], state["height"], state["visible"]);
+                    resize_check = false;
+                    ui.close(window);
                 }
             }
             HostEvent::Tray { tray, kind, button, .. } => println!("[host] tray {tray} {kind} {button}"),

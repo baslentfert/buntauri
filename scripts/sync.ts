@@ -10,7 +10,7 @@
 //
 // Run it again after updating Bun to a new release (see UPSTREAM).
 
-import { cpSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
 const repo = resolve(import.meta.dir, "..");
@@ -192,7 +192,19 @@ const typeFixes: [string, string, string][] = [
 ];
 
 // 1. New files.
-cpSync(join(repo, "bun-glue"), bun, { recursive: true, filter: src => !src.endsWith("Cargo.lock") });
+// Our own copy loop: Bun 1.3's cpSync with a `filter` silently skips files
+// that already exist, which left stale glue in an existing checkout.
+// Cargo.lock is handled separately below.
+function copyTree(from: string, to: string) {
+  mkdirSync(to, { recursive: true });
+  for (const entry of readdirSync(from, { withFileTypes: true })) {
+    const src = join(from, entry.name);
+    const dst = join(to, entry.name);
+    if (entry.isDirectory()) copyTree(src, dst);
+    else if (entry.name !== "Cargo.lock") copyFileSync(src, dst);
+  }
+}
+copyTree(join(repo, "bun-glue"), bun);
 console.log(`copied bun-glue/ -> ${bun}`);
 
 // 2. Anchored edits.

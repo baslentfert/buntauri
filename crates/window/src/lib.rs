@@ -10,7 +10,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 
 use tao::event::{Event, WindowEvent};
@@ -20,8 +20,10 @@ use tao::window::Window;
 use wry::http::{header::CONTENT_TYPE, Request, Response};
 use wry::{DragDropEvent, WebContext, WebView, WebViewBuilder};
 
+mod control;
 mod native;
 mod options;
+pub use control::WindowOp;
 pub use native::{decode_base64, decode_png, MenuItemSpec, Owner, TraySpec};
 pub use options::{BackgroundThrottling, Color, IpcPolicy, PreventOverflow, ScrollBarStyle, Theme, WindowOptions};
 
@@ -56,6 +58,10 @@ pub enum HostEvent {
     DragDrop { window: WindowId, kind: &'static str, paths: Vec<String>, x: i32, y: i32 },
     /// The user asked to close the window. It is already destroyed.
     Closed { window: WindowId },
+    /// Window lifecycle: `kind` is `resized` / `moved` (logical px in `data`),
+    /// `focus`, `blur`, `scalechanged`, or `closerequested` (only with
+    /// preventClose on; the window stays open).
+    Window { window: WindowId, kind: &'static str, data: serde_json::Value },
     /// The window could not be created (bad options, duplicate label, ...).
     CreateFailed { window: WindowId, message: String },
     Error { window: Option<WindowId>, message: String },
@@ -81,6 +87,7 @@ impl HostEvent {
             | HostEvent::Invoke { window, .. }
             | HostEvent::DragDrop { window, .. }
             | HostEvent::Closed { window }
+            | HostEvent::Window { window, .. }
             | HostEvent::CreateFailed { window, .. } => Some(*window),
             HostEvent::Error { window, .. } | HostEvent::Warning { window, .. } | HostEvent::Menu { window, .. } => *window,
             HostEvent::Tray { .. } | HostEvent::TrayFailed { .. } | HostEvent::Exited => None,
@@ -117,6 +124,9 @@ impl HostEvent {
                 json!({ "type": "dragdrop", "window": window, "kind": kind, "paths": paths, "x": x, "y": y })
             }
             HostEvent::Closed { window } => json!({ "type": "closed", "window": window }),
+            HostEvent::Window { window, kind, data } => {
+                json!({ "type": "window", "window": window, "kind": kind, "data": data })
+            }
             HostEvent::CreateFailed { window, message } => json!({ "type": "createfailed", "window": window, "message": message }),
             HostEvent::Error { window, message } => json!({ "type": "error", "window": window, "message": message }),
             HostEvent::Warning { window, message } => json!({ "type": "warning", "window": window, "message": message }),
@@ -173,6 +183,7 @@ enum Command {
     SetTitle(WindowId, String),
     Close(WindowId),
     SetIcon(WindowId, Rgba),
+    Op(WindowId, WindowOp),
     SetMenu(WindowId, Option<Vec<MenuItemSpec>>),
     Popup(WindowId, Vec<MenuItemSpec>, Option<(f64, f64)>),
     TrayCreate(TrayId, TraySpec, Option<Rgba>),
@@ -184,6 +195,7 @@ enum Command {
 /// Handle to the UI thread. Cheap to use from any thread.
 pub struct UiThread {
     proxy: EventLoopProxy<Command>,
+    states: States,
     next_id: AtomicU32,
     join: Option<JoinHandle<()>>,
 }
@@ -194,13 +206,15 @@ impl UiThread {
         F: Fn(HostEvent) + Send + Sync + 'static,
     {
         let (tx, rx) = mpsc::channel();
+        let states: States = Default::default();
+        let ui_states = states.clone();
         let join = std::thread::Builder::new()
             .name("buntauri-ui".into())
-            .spawn(move || ui_main(tx, Arc::new(on_event), assets))?;
+            .spawn(move || ui_main(tx, Arc::new(on_event), assets, ui_states))?;
         let proxy = rx
             .recv()
             .map_err(|_| std::io::Error::other("UI thread failed to start"))?;
-        Ok(Self { proxy, next_id: AtomicU32::new(1), join: Some(join) })
+        Ok(Self { proxy, states, next_id: AtomicU32::new(1), join: Some(join) })
     }
 
     pub fn create_window(&self, opts: WindowOptions) -> WindowId {
@@ -224,6 +238,18 @@ impl UiThread {
 
     pub fn close(&self, window: WindowId) {
         self.send(Command::Close(window));
+    }
+
+    /// Run a window operation (show, hide, setSize, ...) given as JSON.
+    pub fn window_op_json(&self, window: WindowId, json: &str) -> Result<(), String> {
+        self.send(Command::Op(window, WindowOp::from_json(json)?));
+        Ok(())
+    }
+
+    /// The window's last known state as JSON (`null` before it exists or
+    /// after it closed). Updated by the UI thread after every change.
+    pub fn window_state_json(&self, window: WindowId) -> String {
+        self.states.lock().unwrap().get(&window).map_or_else(|| "null".into(), |v| v.to_string())
     }
 
     /// Window icon (title bar + taskbar) from a base64 PNG.
@@ -302,6 +328,7 @@ impl UiThread {
 }
 
 type Emit = Arc<dyn Fn(HostEvent) + Send + Sync>;
+type States = Arc<Mutex<HashMap<WindowId, serde_json::Value>>>;
 
 fn parse_tray(json: &str) -> Result<(TraySpec, Option<Rgba>), String> {
     let spec: TraySpec = serde_json::from_str(json).map_err(|e| format!("invalid tray: {e}"))?;
@@ -317,6 +344,8 @@ struct Entry {
     /// Menu bar and the last context menu; kept alive while the window lives.
     menu: Option<muda::Menu>,
     popup: Option<muda::Menu>,
+    /// Close button emits `closerequested` instead of closing.
+    prevent_close: bool,
     // Field order matters: the webview drops before its window, and both
     // before the web context that holds the data directory.
     webview: WebView,
@@ -324,7 +353,13 @@ struct Entry {
     _context: Option<Box<WebContext>>,
 }
 
-fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc<dyn AssetProvider>) {
+fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc<dyn AssetProvider>, states: States) {
+    let snap = |id: WindowId, e: &Entry| {
+        states.lock().unwrap().insert(id, control::snapshot(&e.window, e.prevent_close));
+    };
+    let forget = |id: WindowId| {
+        states.lock().unwrap().remove(&id);
+    };
     let mut builder = EventLoopBuilder::<Command>::with_user_event();
     #[cfg(target_os = "windows")]
     {
@@ -405,6 +440,7 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
                 Command::Create(id, opts) => match create(target, id, opts, &windows, &emit, &assets) {
                     Ok(entry) => {
                         by_native.insert(entry.window.id(), id);
+                        snap(id, &entry);
                         windows.insert(id, entry);
                         emit(HostEvent::Created { window: id });
                     }
@@ -425,9 +461,18 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
                 Command::Close(id) => {
                     if let Some(e) = windows.remove(&id) {
                         by_native.remove(&e.window.id());
+                        forget(id);
                         #[cfg(target_os = "windows")]
                         accels.borrow_mut().remove(&id);
                         emit(HostEvent::Closed { window: id });
+                    }
+                }
+                Command::Op(id, op) => {
+                    if let Some(e) = windows.get_mut(&id) {
+                        if let Err(message) = control::apply(&e.window, &op, &mut e.prevent_close) {
+                            emit(HostEvent::Error { window: Some(id), message });
+                        }
+                        snap(id, e);
                     }
                 }
                 Command::SetIcon(id, (rgba, w, h)) => {
@@ -486,12 +531,42 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
                 }
             },
             Event::WindowEvent { window_id, event: WindowEvent::CloseRequested, .. } => {
+                if let Some(&id) = by_native.get(&window_id) {
+                    if windows.get(&id).is_some_and(|e| e.prevent_close) {
+                        emit(HostEvent::Window { window: id, kind: "closerequested", data: serde_json::Value::Null });
+                        return;
+                    }
+                }
                 if let Some(id) = by_native.remove(&window_id) {
                     windows.remove(&id);
+                    forget(id);
                     #[cfg(target_os = "windows")]
                     accels.borrow_mut().remove(&id);
                     emit(HostEvent::Closed { window: id });
                 }
+            }
+            Event::WindowEvent { window_id, event, .. } => {
+                let Some(&id) = by_native.get(&window_id) else { return };
+                let Some(e) = windows.get(&id) else { return };
+                let scale = e.window.scale_factor();
+                let (kind, data) = match event {
+                    WindowEvent::Resized(s) => {
+                        let s = s.to_logical::<f64>(scale);
+                        ("resized", serde_json::json!({ "width": s.width, "height": s.height }))
+                    }
+                    WindowEvent::Moved(p) => {
+                        let p = p.to_logical::<f64>(scale);
+                        ("moved", serde_json::json!({ "x": p.x, "y": p.y }))
+                    }
+                    WindowEvent::Focused(true) => ("focus", serde_json::Value::Null),
+                    WindowEvent::Focused(false) => ("blur", serde_json::Value::Null),
+                    WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                        ("scalechanged", serde_json::json!({ "scaleFactor": scale_factor }))
+                    }
+                    _ => return,
+                };
+                snap(id, e);
+                emit(HostEvent::Window { window: id, kind, data });
             }
             _ => {}
         }
@@ -593,7 +668,15 @@ fn create(
     let webview = webview.map_err(|e| e.to_string())?;
 
     opts.place(&window);
-    let mut entry = Entry { label: opts.label.clone(), menu: None, popup: None, webview, window, _context: context };
+    let mut entry = Entry {
+        label: opts.label.clone(),
+        menu: None,
+        popup: None,
+        prevent_close: opts.prevent_close,
+        webview,
+        window,
+        _context: context,
+    };
     if let Some(b64) = &opts.icon {
         let (rgba, w, h) = decode_png(&decode_base64(b64)?)?;
         let icon = tao::window::Icon::from_rgba(rgba, w, h).map_err(|e| format!("bad icon: {e}"))?;

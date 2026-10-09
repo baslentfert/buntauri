@@ -87,8 +87,8 @@ What is left is the native shell around the window:
 - [x] Window icon (tao): `icon` option and `win.setIcon()`
 - [x] Tray icon with menu and click events (`tray-icon` 0.26): `new Tray({...})`
 - [x] Menus: window menu bar and context menus (`muda` 0.21), accelerators on Windows
-- [ ] Window control at runtime: minimize, maximize, show/hide, size, position, focus,
-      always-on-top, fullscreen, plus resize/move/focus events (tao)
+- [x] Window control at runtime: minimize, maximize, show/hide, size, position, focus,
+      always-on-top, fullscreen, plus resize/move/focus events and `preventClose` (tao)
 - [ ] Native dialogs: open/save file, folder picker, message box (`rfd`)
 - [ ] Notifications (Windows toasts)
 - [ ] Global shortcuts (`global-hotkey`)

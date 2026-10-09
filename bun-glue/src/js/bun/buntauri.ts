@@ -21,6 +21,8 @@ const nativeEmit = $newRustFunction("buntauri/window.rs", "emit", 3);
 const nativeSetIcon = $newRustFunction("buntauri/window.rs", "setIcon", 2);
 const nativeSetMenu = $newRustFunction("buntauri/window.rs", "setMenu", 2);
 const nativePopupMenu = $newRustFunction("buntauri/window.rs", "popupMenu", 4);
+const nativeWindowOp = $newRustFunction("buntauri/window.rs", "windowOp", 2);
+const nativeWindowState = $newRustFunction("buntauri/window.rs", "windowState", 1);
 const nativeTrayCreate = $newRustFunction("buntauri/window.rs", "trayCreate", 1);
 const nativeTrayUpdate = $newRustFunction("buntauri/window.rs", "trayUpdate", 2);
 const nativeTrayRemove = $newRustFunction("buntauri/window.rs", "trayRemove", 1);
@@ -126,9 +128,29 @@ class Emitter {
 
 type Handler = (args: any, info: { window: Window; origin: string; remote: boolean }) => any;
 
+type WindowState = {
+  visible: boolean;
+  minimized: boolean;
+  maximized: boolean;
+  focused: boolean;
+  fullscreen: boolean;
+  alwaysOnTop: boolean;
+  resizable: boolean;
+  decorated: boolean;
+  preventClose: boolean;
+  /** Inner size and outer position, in CSS pixels. */
+  width: number;
+  height: number;
+  x: number | null;
+  y: number | null;
+  scaleFactor: number;
+};
+
 /**
  * A native window with a webview.
- * Events: "created", "closed", "menu" (item id), "dragdrop", "error", "warning".
+ * Events: "created", "closed", "menu" (item id), "dragdrop", "error", "warning",
+ * "resized" ({ width, height }), "moved" ({ x, y }), "focus", "blur",
+ * "scalechanged" ({ scaleFactor }), "closerequested" (only with preventClose).
  */
 class Window extends Emitter {
   #id: number;
@@ -215,6 +237,40 @@ class Window extends Emitter {
     if (!this.#closed) nativeClose(this.#id);
   }
 
+  /** Last known state (updated by the UI thread); null before creation or after close. */
+  get state(): WindowState | null {
+    return this.#closed ? null : JSON.parse(nativeWindowState(this.#id));
+  }
+
+  #op(op: string, args?: Record<string, unknown>) {
+    if (!this.#closed) nativeWindowOp(this.#id, JSON.stringify({ op, ...args }));
+    return this;
+  }
+  show() { return this.#op("show"); }
+  hide() { return this.#op("hide"); }
+  minimize() { return this.#op("minimize"); }
+  unminimize() { return this.#op("unminimize"); }
+  maximize() { return this.#op("maximize"); }
+  unmaximize() { return this.#op("unmaximize"); }
+  toggleMaximize() { return this.#op("toggleMaximize"); }
+  /** Bring to front and focus; also shows and restores the window. */
+  focus() { return this.#op("focus"); }
+  center() { return this.#op("center"); }
+  setSize(width: number, height: number) { return this.#op("setSize", { width, height }); }
+  setPosition(x: number, y: number) { return this.#op("setPosition", { x, y }); }
+  setMinSize(width: number | null, height: number | null) { return this.#op("setMinSize", { width, height }); }
+  setMaxSize(width: number | null, height: number | null) { return this.#op("setMaxSize", { width, height }); }
+  setAlwaysOnTop(value: boolean) { return this.#op("setAlwaysOnTop", { value }); }
+  setFullscreen(value: boolean) { return this.#op("setFullscreen", { value }); }
+  setResizable(value: boolean) { return this.#op("setResizable", { value }); }
+  setDecorations(value: boolean) { return this.#op("setDecorations", { value }); }
+  /** With true, the close button emits "closerequested" instead of closing (e.g. hide to tray). */
+  setPreventClose(value: boolean) { return this.#op("setPreventClose", { value }); }
+  /** Move the window with the mouse; call from a mousedown on a custom title bar. */
+  startDragging() { return this.#op("startDragging"); }
+  /** Flash the taskbar button. */
+  requestAttention() { return this.#op("requestAttention"); }
+
   /** @internal */
   _dispatch(ev: any) {
     switch (ev.type) {
@@ -231,6 +287,9 @@ class Window extends Emitter {
         this._fire("menu", ev.id);
         break;
       }
+      case "window":
+        this._fire(ev.kind, ev.data ?? undefined);
+        break;
       case "dragdrop":
         this._fire("dragdrop", { kind: ev.kind, paths: ev.paths, x: ev.x, y: ev.y });
         break;

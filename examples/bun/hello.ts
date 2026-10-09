@@ -14,6 +14,8 @@ const win = new Window({
   center: true,
   theme: "dark",
   icon: import.meta.dir + "/assets/icon.png",
+  // The close button hides to the tray instead of quitting (see "closerequested").
+  preventClose: !selftest,
   menu: [
     {
       text: "File",
@@ -32,12 +34,22 @@ const tray = new Tray({
   icon: import.meta.dir + "/assets/icon.png",
   tooltip: "buntauri + Bun",
   menu: [
+    { text: "Show window", action: () => win.focus() },
     { text: "Say hello", action: () => win.emit("hello", { from: "the tray" }) },
     { type: "separator" },
     { text: "Quit", action: () => quit() },
   ],
 });
-tray.on("click", ({ button }) => console.log(`tray clicked (${button})`));
+tray.on("click", ({ button }) => {
+  console.log(`tray clicked (${button})`);
+  if (button === "left") win.focus();
+});
+
+win.on("closerequested", () => {
+  win.hide();
+  console.log("window hidden to the tray; click the tray icon to bring it back");
+});
+win.on("resized", ({ width, height }) => console.log(`resized to ${width}x${height}`));
 
 function quit() {
   tray.remove();
