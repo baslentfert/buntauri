@@ -1,4 +1,5 @@
-//! macOS UI host process entry. AppKit needs the process main thread, which
+//! UI host process entry (macOS, Linux). AppKit needs the process main thread, and on
+//! Linux GTK/WebKitGTK must stay out of the bun process; the main thread
 //! in Bun runs JS, so `bun:buntauri` starts this same executable again as its
 //! UI host (see `buntauri_window`'s host.rs). `cli::Command::start` calls
 //! `maybe_run` first thing, like Bun's own `BUN_INTERNAL_WEBVIEW_HOST` check:
@@ -9,7 +10,7 @@
 
 #[inline]
 pub(crate) fn maybe_run() {
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     buntauri_window::run_ui_host_if_requested(|spec| {
         // A compiled app serves app:// from its own executable: load the
         // graph, as `Command::start` would have done after this point.
