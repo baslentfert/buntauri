@@ -4,6 +4,8 @@
 //   bun-debug app.ts
 //   NATIVE_SELFTEST=1 bun-debug app.ts   (clipboard, shortcut, single instance; no dialogs)
 import { Window, clipboard, dialog, globalShortcut, notify, requestSingleInstance, setAssetsDir } from "bun:buntauri";
+// A file import, so `bun build --compile` embeds the icon (under a hashed name).
+import iconPath from "./assets/icon.png" with { type: "file" };
 
 const selftest = !!process.env.NATIVE_SELFTEST;
 
@@ -22,7 +24,7 @@ const win = new Window({
   height: 560,
   center: true,
   theme: "dark",
-  icon: import.meta.dir + "/assets/icon.png",
+  icon: iconPath,
 });
 const log = (line: string) => win.emit("log", line);
 

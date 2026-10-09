@@ -2,6 +2,8 @@
 //   bun-debug examples/bun/hello.ts
 //   BUNTAURI_SELFTEST=1 bun-debug examples/bun/hello.ts   (automated round trip, exits by itself)
 import { Tray, Window, setAssetsDir } from "bun:buntauri";
+// A file import, so `bun build --compile` embeds the icon (under a hashed name).
+import iconPath from "./assets/icon.png" with { type: "file" };
 
 setAssetsDir(import.meta.dir + "/assets");
 const selftest = !!process.env.BUNTAURI_SELFTEST;
@@ -13,7 +15,7 @@ const win = new Window({
   height: 480,
   center: true,
   theme: "dark",
-  icon: import.meta.dir + "/assets/icon.png",
+  icon: iconPath,
   // The close button hides to the tray instead of quitting (see "closerequested").
   preventClose: !selftest,
   menu: [
@@ -31,7 +33,7 @@ const win = new Window({
 
 // A tray icon keeps the app alive on its own; quit() removes it.
 const tray = new Tray({
-  icon: import.meta.dir + "/assets/icon.png",
+  icon: iconPath,
   tooltip: "buntauri + Bun",
   menu: [
     { text: "Show window", action: () => win.focus() },
