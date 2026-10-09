@@ -58,7 +58,24 @@ jobs:
 
       - name: Build Bun (${{ inputs.profile }})
         working-directory: bun
-        run: bun run build:${{ inputs.profile }}
+        # Full output goes to a file: the link prints thousands of harmless
+        # lld warnings that push the real errors out of the Actions log.
+        run: |
+          set -o pipefail
+          bun run build:${{ inputs.profile }} 2>&1 | tee ../build.log | grep -v "Linking two modules of different target triples"
+
+      - name: Build errors
+        if: failure()
+        run: |
+          grep -v "Linking two modules of different target triples" build.log             | grep -iE "error|undefined|not found|cannot|unable|FAILED|not expected|violation"             | grep -vE "type error|ts-expect|TS[0-9]{4}" | head -150 || true
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.job }}-${{ runner.os }}
+          path: build.log
+          retention-days: 7
 
       - name: Disk space after
         if: always()
