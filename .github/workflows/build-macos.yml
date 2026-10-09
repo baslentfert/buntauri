@@ -43,7 +43,7 @@ jobs:
 
       - name: Tooling
         run: |
-          brew install automake ccache cmake coreutils gnu-sed go icu4c libiconv libtool ninja pkg-config ruby llvm@23
+          brew install automake ccache cmake coreutils gnu-sed go icu4c libiconv libtool ninja pkg-config ruby llvm@23 nasm
           echo "$(brew --prefix llvm@23)/bin" >> "$GITHUB_PATH"
           rustup --version
 
