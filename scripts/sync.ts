@@ -141,6 +141,15 @@ const edits: Edit[] = [
     anchor: `    "bun:ffi"_s,\n`,
     insert: `    "bun:buntauri"_s, // ${MARK}\n`,
   },
+  // macOS: the UI host process entry (bun-glue/src/runtime/buntauri/host.rs).
+  // Runs before the standalone graph and JSC, like Bun's own WebView host;
+  // a no-op unless this process was started as buntauri's UI host.
+  {
+    file: "src/runtime/cli/mod.rs",
+    anchor: "        // bun build --compile entry point\n",
+    before: true,
+    insert: `        crate::buntauri::host::maybe_run(); // ${MARK}\n`,
+  },
   // macOS/Linux: frameworks and shared libraries tao/wry need at link time
   // (bun-glue/scripts/build/buntauri-libs.ts); Bun only links its own list.
   {

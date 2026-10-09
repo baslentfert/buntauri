@@ -2,10 +2,10 @@
 //! clipboard text (arboard) and global shortcuts (global-hotkey). The same
 //! crates Tauri's dialog, notification, clipboard and global-shortcut plugins use.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Filter {
     pub name: String,
@@ -13,7 +13,7 @@ pub struct Filter {
 }
 
 /// A dialog, as JSON: `{"kind": "open", "multiple": true, "filters": [...]}`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum DialogSpec {
     /// Pick file(s), or folder(s) with `directory: true`. Result: a path, an
@@ -168,7 +168,7 @@ pub(crate) fn run_dialog(spec: &DialogSpec, parent: Option<Parent>) -> Value {
 
 /// A desktop notification. On Windows a toast; `appId` is the AppUserModelID
 /// shown as the sender (default: Windows PowerShell's, as notify-rust does).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct NotificationSpec {
     pub title: String,

@@ -1,11 +1,15 @@
 //! buntauri window layer.
 //!
-//! Runs tao + wry on a dedicated UI thread. The host thread (later: Bun's JS
+//! Runs tao + wry on a dedicated UI thread. The host thread (Bun's JS
 //! thread) talks to it through [`UiThread`] (commands in) and an event
 //! callback (events out). Nothing here blocks the host thread.
 //!
-//! Inside Bun the event callback will push onto the concurrent task queue and
-//! wake the event loop; in the standalone demo it is just an mpsc channel.
+//! Inside Bun the event callback pushes onto the concurrent task queue and
+//! wakes the event loop; in the standalone demo it is just an mpsc channel.
+//!
+//! macOS: AppKit only runs on the process main thread, which belongs to the
+//! host. There the UI runs in a child process instead (same executable, see
+//! [`run_ui_host_if_requested`]); [`UiThread`] has the same API either way.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -16,12 +20,15 @@ use std::thread::JoinHandle;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget};
 use tao::platform::run_return::EventLoopExtRunReturn;
+use serde::{Deserialize, Serialize};
 use tao::window::Window;
 use wry::http::{header::CONTENT_TYPE, Request, Response};
 use wry::{DragDropEvent, WebContext, WebView, WebViewBuilder};
 
 mod control;
 mod extras;
+#[cfg(target_os = "macos")]
+mod host;
 mod native;
 mod options;
 pub use control::WindowOp;
@@ -35,12 +42,57 @@ pub type TrayId = u32;
 /// Straight RGBA8 pixels: (pixels, width, height).
 type Rgba = (Vec<u8>, u32, u32);
 
+/// Serde for [`Rgba`] as `[base64, width, height]`, so icons cross the UI
+/// host pipe as compact JSON.
+mod rgba_serde {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &super::Rgba, s: S) -> Result<S::Ok, S::Error> {
+        (base64::engine::general_purpose::STANDARD.encode(&v.0), v.1, v.2).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<super::Rgba, D::Error> {
+        let (b64, w, h) = <(String, u32, u32)>::deserialize(d)?;
+        let px = base64::engine::general_purpose::STANDARD.decode(b64).map_err(serde::de::Error::custom)?;
+        Ok((px, w, h))
+    }
+
+    pub mod opt {
+        use super::*;
+
+        pub fn serialize<S: Serializer>(v: &Option<super::super::Rgba>, s: S) -> Result<S::Ok, S::Error> {
+            match v {
+                Some(v) => s.serialize_some(&Wrap(v)),
+                None => s.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<super::super::Rgba>, D::Error> {
+            #[derive(Deserialize)]
+            struct Owned(#[serde(with = "super")] super::super::Rgba);
+            Ok(Option::<Owned>::deserialize(d)?.map(|o| o.0))
+        }
+
+        struct Wrap<'a>(&'a super::super::Rgba);
+
+        impl Serialize for Wrap<'_> {
+            fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                super::serialize(self.0, s)
+            }
+        }
+    }
+}
+
 pub type WindowId = u32;
 
 /// Scheme used for embedded assets: `app://localhost/<path>`.
 /// On Windows wry maps this to `http://app.localhost/<path>`.
 pub const ASSET_SCHEME: &str = "app";
 pub const ASSET_ROOT: &str = "app://localhost/";
+
+/// Where inline HTML is served on macOS (see `create`).
+const INLINE_PATH: &str = "/__buntauri/inline.html";
 
 /// JS injected into every page before any page script runs.
 const BRIDGE_JS: &str = include_str!("bridge.js");
@@ -87,6 +139,67 @@ pub enum HostEvent {
 }
 
 impl HostEvent {
+    /// Parse what [`HostEvent::to_json`] wrote (the UI host sends events this way).
+    pub fn from_json(json: &str) -> Result<HostEvent, String> {
+        let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("bad event: {e}"))?;
+        let num = |k: &str| v[k].as_u64().map(|n| n as u32);
+        let window = || num("window").ok_or_else(|| format!("event without window: {json}"));
+        let tray = || num("tray").ok_or_else(|| format!("event without tray: {json}"));
+        let text = |k: &str| v[k].as_str().unwrap_or_default().to_string();
+        // Kinds are a small fixed set; map them back to their static names.
+        let kind = |k: &str, known: &[&'static str]| -> &'static str {
+            let s = v[k].as_str().unwrap_or_default();
+            known.iter().copied().find(|&n| n == s).unwrap_or("unknown")
+        };
+        Ok(match v["type"].as_str().unwrap_or_default() {
+            "created" => HostEvent::Created { window: window()? },
+            "invoke" => HostEvent::Invoke {
+                window: window()?,
+                call: v["call"].as_u64().unwrap_or_default(),
+                cmd: text("cmd"),
+                args: v["args"].to_string(),
+                origin: text("origin"),
+                remote: v["remote"].as_bool().unwrap_or_default(),
+            },
+            "dragdrop" => HostEvent::DragDrop {
+                window: window()?,
+                kind: kind("kind", &["enter", "over", "drop", "leave"]),
+                paths: v["paths"].as_array().into_iter().flatten().filter_map(|p| p.as_str().map(String::from)).collect(),
+                x: v["x"].as_i64().unwrap_or_default() as i32,
+                y: v["y"].as_i64().unwrap_or_default() as i32,
+            },
+            "closed" => HostEvent::Closed { window: window()? },
+            "window" => HostEvent::Window {
+                window: window()?,
+                kind: kind("kind", &["resized", "moved", "focus", "blur", "scalechanged", "closerequested"]),
+                data: v["data"].clone(),
+            },
+            "createfailed" => HostEvent::CreateFailed { window: window()?, message: text("message") },
+            "error" => HostEvent::Error { window: num("window"), message: text("message") },
+            "warning" => HostEvent::Warning { window: num("window"), message: text("message") },
+            "menu" => HostEvent::Menu { window: num("window"), tray: num("tray"), id: text("id") },
+            "tray" => HostEvent::Tray {
+                tray: tray()?,
+                kind: kind("kind", &["click", "doubleclick"]),
+                button: kind("button", &["left", "right", "middle"]),
+                x: v["x"].as_f64().unwrap_or_default(),
+                y: v["y"].as_f64().unwrap_or_default(),
+            },
+            "trayfailed" => HostEvent::TrayFailed { tray: tray()?, message: text("message") },
+            "reply" => HostEvent::Reply {
+                req: v["req"].as_u64().ok_or_else(|| format!("reply without req: {json}"))?,
+                ok: v["ok"].as_bool().unwrap_or_default(),
+                value: v["value"].clone(),
+            },
+            "shortcut" => HostEvent::Shortcut {
+                accelerator: text("accelerator"),
+                state: kind("state", &["pressed", "released"]),
+            },
+            "exited" => HostEvent::Exited,
+            other => return Err(format!("unknown event type {other:?}")),
+        })
+    }
+
     /// The window this event is about, if any.
     pub fn window(&self) -> Option<WindowId> {
         match self {
@@ -161,11 +274,34 @@ impl HostEvent {
     }
 }
 
+/// Call this first thing in `main` (before anything else touches the
+/// process): when this process was started as the macOS UI host, it runs the
+/// UI and never returns. `make_assets` gets the host's
+/// [`AssetProvider::host_spec`] and rebuilds the provider. Elsewhere, and in a
+/// normal start, it returns right away.
+pub fn run_ui_host_if_requested<F>(make_assets: F)
+where
+    F: FnOnce(Option<String>) -> Arc<dyn AssetProvider>,
+{
+    #[cfg(target_os = "macos")]
+    if std::env::var_os(host::ENV).is_some() {
+        let spec = std::env::var(host::ENV_ASSETS).ok();
+        host::run(make_assets(spec));
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = make_assets;
+}
+
 /// Serves files from a directory on disk. Paths that try to leave the
 /// directory (`..`, absolute, drive letters) are refused.
 pub struct DirAssets(pub std::path::PathBuf);
 
 impl AssetProvider for DirAssets {
+    fn host_spec(&self) -> Option<String> {
+        // Absolute, so the UI host finds it whatever its working directory.
+        Some(std::path::absolute(&self.0).unwrap_or_else(|_| self.0.clone()).to_string_lossy().into_owned())
+    }
+
     fn get(&self, path: &str) -> Option<Asset> {
         let rel = std::path::Path::new(path);
         if rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
@@ -195,19 +331,28 @@ pub struct Asset {
 /// standalone module graph (`'static` section bytes, no copy).
 pub trait AssetProvider: Send + Sync + 'static {
     fn get(&self, path: &str) -> Option<Asset>;
+
+    /// macOS: a string from which the UI host process rebuilds this provider
+    /// (see [`run_ui_host_if_requested`]); `None` serves nothing there.
+    fn host_spec(&self) -> Option<String> {
+        None
+    }
 }
 
+/// What the host asks of the UI. Serializable: on macOS it travels to the
+/// UI host process as one JSON line.
+#[derive(Serialize, Deserialize)]
 enum Command {
     Create(WindowId, WindowOptions),
     Eval(WindowId, String),
     SetTitle(WindowId, String),
     Close(WindowId),
-    SetIcon(WindowId, Rgba),
+    SetIcon(WindowId, #[serde(with = "rgba_serde")] Rgba),
     Op(WindowId, WindowOp),
     SetMenu(WindowId, Option<Vec<MenuItemSpec>>),
     Popup(WindowId, Vec<MenuItemSpec>, Option<(f64, f64)>),
-    TrayCreate(TrayId, TraySpec, Option<Rgba>),
-    TrayUpdate(TrayId, TraySpec, Option<Rgba>),
+    TrayCreate(TrayId, TraySpec, #[serde(with = "rgba_serde::opt")] Option<Rgba>),
+    TrayUpdate(TrayId, TraySpec, #[serde(with = "rgba_serde::opt")] Option<Rgba>),
     TrayRemove(TrayId),
     Dialog(u64, Option<WindowId>, DialogSpec),
     Notify(u64, NotificationSpec),
@@ -217,28 +362,51 @@ enum Command {
 
 /// Handle to the UI thread. Cheap to use from any thread.
 pub struct UiThread {
-    proxy: EventLoopProxy<Command>,
+    backend: Backend,
     states: States,
     next_id: AtomicU32,
     next_req: AtomicU64,
-    join: Option<JoinHandle<()>>,
+}
+
+enum Backend {
+    /// tao + wry on a thread of this process (Windows, Linux).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    Thread { proxy: EventLoopProxy<Command>, join: Option<JoinHandle<()>> },
+    /// tao + wry on the main thread of a child process (macOS).
+    #[cfg(target_os = "macos")]
+    Host(host::Client),
 }
 
 impl UiThread {
+    /// Start the UI. On macOS this starts the UI host process, which serves
+    /// `app://` from [`AssetProvider::host_spec`] of `assets`.
     pub fn spawn<F>(on_event: F, assets: Arc<dyn AssetProvider>) -> std::io::Result<Self>
     where
         F: Fn(HostEvent) + Send + Sync + 'static,
     {
-        let (tx, rx) = mpsc::channel();
         let states: States = Default::default();
-        let ui_states = states.clone();
-        let join = std::thread::Builder::new()
-            .name("buntauri-ui".into())
-            .spawn(move || ui_main(tx, Arc::new(on_event), assets, ui_states))?;
-        let proxy = rx
-            .recv()
-            .map_err(|_| std::io::Error::other("UI thread failed to start"))?;
-        Ok(Self { proxy, states, next_id: AtomicU32::new(1), next_req: AtomicU64::new(1), join: Some(join) })
+        #[cfg(target_os = "macos")]
+        let backend = Backend::Host(host::Client::spawn(Arc::new(on_event), assets.host_spec(), states.clone())?);
+        #[cfg(not(target_os = "macos"))]
+        let backend = {
+            let (tx, rx) = mpsc::channel();
+            let ui_states = states.clone();
+            let on_state: StateSink = Arc::new(move |id, state| {
+                let mut map = ui_states.lock().unwrap();
+                match state {
+                    Some(v) => map.insert(id, v),
+                    None => map.remove(&id),
+                };
+            });
+            let join = std::thread::Builder::new()
+                .name("buntauri-ui".into())
+                .spawn(move || ui_main(tx, Arc::new(on_event), assets, on_state))?;
+            let proxy = rx
+                .recv()
+                .map_err(|_| std::io::Error::other("UI thread failed to start"))?;
+            Backend::Thread { proxy, join: Some(join) }
+        };
+        Ok(Self { backend, states, next_id: AtomicU32::new(1), next_req: AtomicU64::new(1) })
     }
 
     pub fn create_window(&self, opts: WindowOptions) -> WindowId {
@@ -366,24 +534,39 @@ impl UiThread {
     /// Stop the event loop and wait for the UI thread to finish.
     pub fn shutdown(mut self) {
         self.send(Command::Shutdown);
-        if let Some(j) = self.join.take() {
-            let _ = j.join();
+        match &mut self.backend {
+            Backend::Thread { join, .. } => {
+                if let Some(j) = join.take() {
+                    let _ = j.join();
+                }
+            }
+            #[cfg(target_os = "macos")]
+            Backend::Host(client) => client.wait(),
         }
     }
 
     fn send(&self, cmd: Command) {
-        // Only fails once the loop has exited; nothing left to do then.
-        let _ = self.proxy.send_event(cmd);
+        match &self.backend {
+            // Only fails once the loop has exited; nothing left to do then.
+            Backend::Thread { proxy, .. } => {
+                let _ = proxy.send_event(cmd);
+            }
+            #[cfg(target_os = "macos")]
+            Backend::Host(client) => client.send(&cmd),
+        }
     }
 }
 
 type Emit = Arc<dyn Fn(HostEvent) + Send + Sync>;
 type States = Arc<Mutex<HashMap<WindowId, serde_json::Value>>>;
+/// Where the UI reports a window's state snapshot (`None`: the window is gone).
+type StateSink = Arc<dyn Fn(WindowId, Option<serde_json::Value>) + Send + Sync>;
 
 fn parse_tray(json: &str) -> Result<(TraySpec, Option<Rgba>), String> {
-    let spec: TraySpec = serde_json::from_str(json).map_err(|e| format!("invalid tray: {e}"))?;
-    let icon = match &spec.icon {
-        Some(b64) => Some(decode_png(&decode_base64(b64)?)?),
+    let mut spec: TraySpec = serde_json::from_str(json).map_err(|e| format!("invalid tray: {e}"))?;
+    // Decoded here once; the UI only needs the pixels.
+    let icon = match spec.icon.take() {
+        Some(b64) => Some(decode_png(&decode_base64(&b64)?)?),
         None => None,
     };
     Ok((spec, icon))
@@ -403,13 +586,9 @@ struct Entry {
     _context: Option<Box<WebContext>>,
 }
 
-fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc<dyn AssetProvider>, states: States) {
-    let snap = |id: WindowId, e: &Entry| {
-        states.lock().unwrap().insert(id, control::snapshot(&e.window, e.prevent_close));
-    };
-    let forget = |id: WindowId| {
-        states.lock().unwrap().remove(&id);
-    };
+fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc<dyn AssetProvider>, on_state: StateSink) {
+    let snap = |id: WindowId, e: &Entry| on_state(id, Some(control::snapshot(&e.window, e.prevent_close)));
+    let forget = |id: WindowId| on_state(id, None);
     let mut builder = EventLoopBuilder::<Command>::with_user_event();
     #[cfg(target_os = "windows")]
     {
@@ -439,8 +618,8 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
             accels.borrow().values().any(|&h| unsafe { TranslateAcceleratorW(hwnd, h, msg) } == 1)
         });
     }
-    // macOS: AppKit requires the process main thread, so this panics there.
-    // buntauri will use a host subprocess on macOS (see BUNTAURI.md).
+    // macOS: AppKit requires the process main thread; there this runs in the
+    // UI host process (host.rs), on its main thread.
     let mut event_loop = builder.build();
     if ready.send(event_loop.create_proxy()).is_err() {
         return;
@@ -684,7 +863,13 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
                     }
                     _ => return,
                 };
-                snap(id, e);
+                // The event's own size/position: on macOS the window can still
+                // report the old values while the event is delivered.
+                let mut state = control::snapshot(&e.window, e.prevent_close);
+                if let (Some(state), Some(fresh)) = (state.as_object_mut(), data.as_object()) {
+                    state.extend(fresh.clone());
+                }
+                on_state(id, Some(state));
                 emit(HostEvent::Window { window: id, kind, data });
             }
             _ => {}
@@ -741,9 +926,22 @@ fn create(
     let trust_inline = opts.url.is_none() && opts.html.is_some();
     let policy = opts.ipc.clone();
     let assets = assets.clone();
+    // macOS: wry drops IPC from pages whose URL has no host (about:blank,
+    // data:), which is what inline HTML gets. Serve it from app:// instead.
+    #[cfg(target_os = "macos")]
+    let inline: Option<Arc<str>> = if trust_inline { opts.html.as_deref().map(Arc::from) } else { None };
+    #[cfg(not(target_os = "macos"))]
+    let inline: Option<Arc<str>> = None;
+    let inline_page = inline.clone();
     builder = builder
         .with_initialization_script(BRIDGE_JS)
-        .with_custom_protocol(ASSET_SCHEME.into(), move |_, req| serve_asset(&*assets, &req))
+        .with_custom_protocol(ASSET_SCHEME.into(), move |_, req| match &inline_page {
+            Some(html) if req.uri().path() == INLINE_PATH => Response::builder()
+                .header(CONTENT_TYPE, mime_for("index.html"))
+                .body(Cow::Owned(html.as_bytes().to_vec()))
+                .unwrap(),
+            _ => serve_asset(&*assets, &req),
+        })
         .with_ipc_handler(move |req: Request<String>| {
             let origin = req.uri().to_string();
             match ipc_access(req.uri(), trust_inline, &policy) {
@@ -772,6 +970,7 @@ fn create(
 
     builder = match (&opts.url, &opts.html) {
         (Some(url), _) => builder.with_url(resolve_url(url)),
+        (None, Some(_)) if inline.is_some() => builder.with_url(format!("{}{}", ASSET_ROOT, INLINE_PATH.trim_start_matches('/'))),
         (None, Some(html)) => builder.with_html(html),
         (None, None) => builder.with_url(ASSET_ROOT),
     };
@@ -824,10 +1023,23 @@ fn set_menu_bar(e: &mut Entry, id: WindowId, specs: Option<Vec<MenuItemSpec>>) -
         e.menu = Some(menu);
         Ok(())
     }
-    #[cfg(not(target_os = "windows"))]
+    // macOS has one menu bar for the whole app: the window that set its
+    // menu last owns it.
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(old) = e.menu.take() {
+            old.remove_for_nsapp();
+        }
+        let Some(specs) = specs else { return Ok(()) };
+        let menu = native::build_menu(Owner::Window(id), &specs)?;
+        menu.init_for_nsapp();
+        e.menu = Some(menu);
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let _ = (e, id, specs);
-        Err("menu bars are only supported on Windows so far".into())
+        Err("menu bars are only supported on Windows and macOS so far".into())
     }
 }
 
@@ -844,10 +1056,20 @@ fn popup_menu(e: &mut Entry, id: WindowId, specs: &[MenuItemSpec], at: Option<(f
         e.popup = Some(menu);
         Ok(())
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        use muda::ContextMenu as _;
+        use tao::platform::macos::WindowExtMacOS;
+        let pos = at.map(|(x, y)| muda::dpi::Position::Logical(muda::dpi::LogicalPosition::new(x, y)));
+        // SAFETY: ns_view is this live window's content view.
+        unsafe { menu.show_context_menu_for_nsview(e.window.ns_view() as _, pos) };
+        e.popup = Some(menu);
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let _ = (e, at, menu);
-        Err("context menus are only supported on Windows so far".into())
+        Err("context menus are only supported on Windows and macOS so far".into())
     }
 }
 
@@ -1092,6 +1314,56 @@ mod tests {
         assert_eq!(v["type"], "invoke");
         assert_eq!(v["args"]["name"], "x");
         assert_eq!(ev.window(), Some(2));
+    }
+
+    #[test]
+    fn events_round_trip() {
+        let events = [
+            HostEvent::Created { window: 1 },
+            HostEvent::Invoke { window: 2, call: 7, cmd: "greet".into(), args: r#"{"name":"x"}"#.into(), origin: "app://localhost/".into(), remote: true },
+            HostEvent::DragDrop { window: 3, kind: "drop", paths: vec!["/tmp/a b".into()], x: -4, y: 5 },
+            HostEvent::Closed { window: 4 },
+            HostEvent::Window { window: 5, kind: "resized", data: serde_json::json!({ "width": 800.0, "height": 600.0 }) },
+            HostEvent::CreateFailed { window: 6, message: "nope".into() },
+            HostEvent::Error { window: None, message: "e".into() },
+            HostEvent::Warning { window: Some(7), message: "w".into() },
+            HostEvent::Menu { window: None, tray: Some(8), id: "quit".into() },
+            HostEvent::Tray { tray: 9, kind: "doubleclick", button: "right", x: 1.5, y: 2.5 },
+            HostEvent::TrayFailed { tray: 10, message: "t".into() },
+            HostEvent::Reply { req: 11, ok: true, value: serde_json::json!(["C:/a.txt", "C:/b.txt"]) },
+            HostEvent::Reply { req: 12, ok: false, value: serde_json::json!("cancelled") },
+            HostEvent::Shortcut { accelerator: "CmdOrCtrl+Shift+B".into(), state: "pressed" },
+            HostEvent::Exited,
+        ];
+        for ev in events {
+            let json = ev.to_json();
+            assert_eq!(HostEvent::from_json(&json).unwrap().to_json(), json);
+        }
+        assert!(HostEvent::from_json(r#"{"type":"bogus"}"#).is_err());
+    }
+
+    #[test]
+    fn commands_round_trip() {
+        let opts = WindowOptions::from_json(r##"{"label":"x","width":300,"backgroundColor":"#123","menu":[{"id":"a","text":"A"}],"someFutureOption":1}"##).unwrap();
+        let cmds = [
+            Command::Create(1, opts),
+            Command::SetIcon(1, (vec![1, 2, 3, 4], 1, 1)),
+            Command::Op(1, WindowOp::from_json(r#"{"op":"setSize","width":10,"height":20}"#).unwrap()),
+            Command::TrayCreate(2, TraySpec::default(), Some((vec![9; 8], 2, 1))),
+            Command::TrayUpdate(2, TraySpec::default(), None),
+            Command::Dialog(3, Some(1), DialogSpec::from_json(r#"{"kind":"open","multiple":true,"filters":[{"name":"T","extensions":["txt"]}]}"#).unwrap()),
+            Command::Notify(4, NotificationSpec::from_json(r#"{"title":"t","body":"b"}"#).unwrap()),
+            Command::Shortcut(5, true, "CmdOrCtrl+Shift+B".into()),
+            Command::Shutdown,
+        ];
+        for cmd in cmds {
+            let json = serde_json::to_string(&cmd).unwrap();
+            let back: Command = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        }
+        let json = serde_json::to_string(&Command::Create(1, WindowOptions::from_json(r##"{"backgroundColor":"#123"}"##).unwrap())).unwrap();
+        let Command::Create(_, o) = serde_json::from_str(&json).unwrap() else { panic!() };
+        assert_eq!(o.background_color, Some(Color(0x11, 0x22, 0x33, 255)));
     }
 
     #[test]

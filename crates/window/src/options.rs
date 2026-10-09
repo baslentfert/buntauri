@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tao::dpi::{LogicalPosition, LogicalSize, LogicalUnit, PixelUnit};
 use tao::window::{Theme as TaoTheme, WindowBuilder, WindowSizeConstraints};
@@ -17,7 +17,7 @@ use wry::{BackgroundThrottlingPolicy, ProxyConfig, ProxyEndpoint, WebViewBuilder
 
 /// Window + webview options. Field names (camelCase in JSON) and defaults
 /// follow Tauri's `WindowConfig`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WindowOptions {
     /// Unique name, used by `parent` and reported back in events.
@@ -174,7 +174,7 @@ impl Default for WindowOptions {
 /// Set by the host (Bun backend), never by the page: a page can't grant itself
 /// access. Pages served from `app://` (and inline HTML set by the host) may
 /// always invoke every command.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct IpcPolicy {
     /// URL patterns of remote pages that may invoke, e.g. `https://*.example.com`
@@ -185,21 +185,21 @@ pub struct IpcPolicy {
     pub remote_commands: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum PreventOverflow {
     Enable(bool),
     Margin { width: f64, height: f64 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
     Light,
     Dark,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BackgroundThrottling {
     Disabled,
@@ -207,7 +207,7 @@ pub enum BackgroundThrottling {
     Throttle,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ScrollBarStyle {
     #[default]
@@ -238,6 +238,12 @@ impl<'de> Deserialize<'de> for Color {
             Repr::Rgba([r, g, b, a]) => Ok(Color(r, g, b, a)),
             Repr::Obj { red, green, blue, alpha } => Ok(Color(red, green, blue, alpha)),
         }
+    }
+}
+
+impl Serialize for Color {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&format!("#{:02x}{:02x}{:02x}{:02x}", self.0, self.1, self.2, self.3))
     }
 }
 

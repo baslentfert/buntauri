@@ -8,7 +8,7 @@ use std::io::Cursor;
 
 use muda::accelerator::Accelerator;
 use muda::{CheckMenuItem, IsMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// One menu entry. Shapes (Tauri-like):
 /// - `{ "id": "save", "text": "Save", "accelerator": "CmdOrCtrl+S" }`
@@ -17,7 +17,7 @@ use serde::Deserialize;
 /// - `{ "type": "separator" }`
 /// - `{ "predefined": "copy" }` (copy, cut, paste, selectAll, undo, redo,
 ///   minimize, maximize, fullscreen, hide, closeWindow, quit, about)
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MenuItemSpec {
     pub id: Option<String>,
@@ -32,7 +32,7 @@ pub struct MenuItemSpec {
 }
 
 /// Tray icon. `icon` is a PNG, base64-encoded.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TraySpec {
     pub icon: Option<String>,
