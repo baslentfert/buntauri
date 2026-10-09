@@ -1,10 +1,16 @@
-//! macOS UI host process.
+//! UI host process (macOS, Linux/BSD).
 //!
-//! AppKit only runs on the process main thread, and in Bun that thread runs
-//! JS. So on macOS the host starts its own executable again with
-//! `BUNTAURI_UI_HOST=1`, the way Bun's `Bun.WebView` does. The child runs the
-//! same event loop as the UI thread elsewhere ([`crate::ui_main`]), on its main
-//! thread.
+//! The host starts its own executable again with `BUNTAURI_UI_HOST=1`, the
+//! way Bun's `Bun.WebView` does, and the child runs the UI event loop
+//! ([`crate::ui_main`]) on its main thread.
+//! - macOS: AppKit only runs on the process main thread, which in Bun runs JS.
+//! - Linux: GTK/WebKitGTK, and the JavaScriptCore inside WebKitGTK, never
+//!   enter the host process; one JavaScriptCore per process. With stub
+//!   linking (scripts/linux-stubs) the child loads them on demand.
+//!
+//! Startup handshake: the child's first line is `{"type":"__ready"}` once its
+//! event loop runs, or `{"type":"__fatal","message":...}` (e.g. no WebKitGTK);
+//! [`Client::spawn`] waits for it, so such failures are its error.
 //!
 //! The two talk over a Unix socket that is the child's stdin, one JSON value
 //! per line: [`Command`]s go down, [`HostEvent`]s (`HostEvent::to_json`) and
@@ -22,6 +28,7 @@ use std::os::unix::net::UnixStream;
 use std::process::{Child, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use crate::{AssetProvider, Command, Emit, HostEvent, StateSink, States};
 
@@ -32,6 +39,11 @@ pub const ENV_ASSETS: &str = "BUNTAURI_UI_HOST_ASSETS";
 
 /// A state snapshot line from the child: `{"type": "__state", "window": 1, "state": {...}}`.
 const STATE: &str = "__state";
+/// Handshake lines (see the module docs).
+const READY: &str = "__ready";
+const FATAL: &str = "__fatal";
+/// How long the child may take to bring up its UI.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Host side: the running UI host process.
 pub(crate) struct Client {
@@ -51,7 +63,35 @@ impl Client {
             Some(spec) => cmd.env(ENV_ASSETS, spec),
             None => cmd.env_remove(ENV_ASSETS),
         };
-        let child = Arc::new(Mutex::new(cmd.spawn()?));
+        let mut child = cmd.spawn()?;
+        // `cmd` still holds the child's end of the socket; without it a child
+        // that dies during startup is an EOF here right away.
+        drop(cmd);
+
+        // Handshake: wait for the child's first line.
+        ours.set_read_timeout(Some(STARTUP_TIMEOUT))?;
+        let mut lines = BufReader::new(ours.try_clone()?);
+        let mut first = String::new();
+        let got = lines.read_line(&mut first);
+        ours.set_read_timeout(None)?;
+        let first: serde_json::Value = serde_json::from_str(first.trim()).unwrap_or_default();
+        if first["type"] != READY {
+            // A timeout leaves the child running; otherwise it is exiting.
+            if got.is_err() {
+                let _ = child.kill();
+            }
+            let status = child.wait();
+            let message = match first["type"].as_str() {
+                Some(FATAL) => first["message"].as_str().unwrap_or("UI host failed").to_string(),
+                _ => match (got, status) {
+                    (Err(e), _) => format!("UI host did not start: {e}"),
+                    (_, Ok(s)) => format!("UI host exited during startup ({s})"),
+                    (_, Err(e)) => format!("UI host exited during startup: {e}"),
+                },
+            };
+            return Err(std::io::Error::other(message));
+        }
+        let child = Arc::new(Mutex::new(child));
         let owners: Arc<Mutex<HashMap<u32, bool>>> = Default::default();
 
         // Writer: commands are serialized on the caller's thread and written
@@ -73,7 +113,7 @@ impl Client {
             let child = child.clone();
             std::thread::Builder::new().name("buntauri-ui-rx".into()).spawn(move || {
                 let mut exited = false;
-                for line in BufReader::new(ours).lines() {
+                for line in lines.lines() {
                     let Ok(line) = line else { break };
                     if let Some(state) = parse_state(&line) {
                         let (id, state) = state;
@@ -184,6 +224,17 @@ pub(crate) fn run(assets: Arc<dyn AssetProvider>) -> ! {
         // The host is gone if this fails; the reader sees EOF and shuts down.
         let _ = out.write_all(line.as_bytes()).and_then(|_| out.write_all(b"\n"));
     };
+    #[cfg(not(target_os = "macos"))]
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        let message = "cannot open windows: no display (neither DISPLAY nor WAYLAND_DISPLAY is set)";
+        write(serde_json::json!({ "type": FATAL, "message": message }).to_string());
+        std::process::exit(1);
+    }
+    #[cfg(not(target_os = "macos"))]
+    if let Err(message) = crate::load_gtk() {
+        write(serde_json::json!({ "type": FATAL, "message": message }).to_string());
+        std::process::exit(1);
+    }
     let emit: Emit = {
         let write = write.clone();
         Arc::new(move |ev: HostEvent| write(ev.to_json()))
@@ -198,11 +249,13 @@ pub(crate) fn run(assets: Arc<dyn AssetProvider>) -> ! {
     let (ready_tx, ready_rx) = mpsc::channel();
     {
         let emit = emit.clone();
+        let ready = write.clone();
         std::thread::Builder::new()
             .name("buntauri-ui-host-rx".into())
             .spawn(move || {
                 let Ok(proxy) = ready_rx.recv() else { return };
                 let proxy: tao::event_loop::EventLoopProxy<Command> = proxy;
+                ready(serde_json::json!({ "type": READY }).to_string());
                 for line in BufReader::new(socket).lines() {
                     let Ok(line) = line else { break };
                     match serde_json::from_str::<Command>(&line) {

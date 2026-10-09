@@ -27,7 +27,7 @@ use wry::{DragDropEvent, WebContext, WebView, WebViewBuilder};
 
 mod control;
 mod extras;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 mod host;
 mod native;
 mod options;
@@ -283,12 +283,12 @@ pub fn run_ui_host_if_requested<F>(make_assets: F)
 where
     F: FnOnce(Option<String>) -> Arc<dyn AssetProvider>,
 {
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     if std::env::var_os(host::ENV).is_some() {
         let spec = std::env::var(host::ENV_ASSETS).ok();
         host::run(make_assets(spec));
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(unix))]
     let _ = make_assets;
 }
 
@@ -373,25 +373,28 @@ pub struct UiThread {
 }
 
 enum Backend {
-    /// tao + wry on a thread of this process (Windows, Linux).
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    /// tao + wry on a thread of this process (Windows).
+    #[cfg_attr(unix, allow(dead_code))]
     Thread { proxy: EventLoopProxy<Command>, join: Option<JoinHandle<()>> },
-    /// tao + wry on the main thread of a child process (macOS).
-    #[cfg(target_os = "macos")]
+    /// tao + wry on the main thread of a child process (macOS, Linux/BSD).
+    /// macOS: AppKit needs the main thread. Linux: GTK/WebKitGTK (and the
+    /// JavaScriptCore of WebKitGTK) stay out of the host process.
+    #[cfg(unix)]
     Host(host::Client),
 }
 
 impl UiThread {
-    /// Start the UI. On macOS this starts the UI host process, which serves
-    /// `app://` from [`AssetProvider::host_spec`] of `assets`.
+    /// Start the UI. On macOS and Linux this starts the UI host process,
+    /// which serves `app://` from [`AssetProvider::host_spec`] of `assets`;
+    /// it fails if that process cannot show windows (e.g. no WebKitGTK).
     pub fn spawn<F>(on_event: F, assets: Arc<dyn AssetProvider>) -> std::io::Result<Self>
     where
         F: Fn(HostEvent) + Send + Sync + 'static,
     {
         let states: States = Default::default();
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         let backend = Backend::Host(host::Client::spawn(Arc::new(on_event), assets.host_spec(), states.clone())?);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(unix))]
         let backend = {
             let (tx, rx) = mpsc::channel();
             let ui_states = states.clone();
@@ -559,7 +562,7 @@ impl UiThread {
                     let _ = j.join();
                 }
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(unix)]
             Backend::Host(client) => client.wait(),
         }
     }
@@ -570,10 +573,38 @@ impl UiThread {
             Backend::Thread { proxy, .. } => {
                 let _ = proxy.send_event(cmd);
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(unix)]
             Backend::Host(client) => client.send(&cmd),
         }
     }
+}
+
+/// Linux/BSD, in the UI host process: GTK and WebKitGTK may be linked
+/// through lazy-loading stubs (no NEEDED entries, so the binary starts
+/// without them). Load them up front: a missing library is then a clear
+/// error, not an abort on the first GTK call.
+#[cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
+pub(crate) fn load_gtk() -> Result<(), String> {
+    use std::ffi::{c_char, c_int, c_void, CStr};
+    unsafe extern "C" {
+        fn dlopen(file: *const c_char, mode: c_int) -> *mut c_void;
+        fn dlerror() -> *mut c_char;
+    }
+    const RTLD_LAZY: c_int = 0x1;
+    const RTLD_GLOBAL: c_int = 0x100;
+    // WebKitGTK pulls in GTK 3, GLib, libsoup and its JavaScriptCore.
+    for lib in [c"libwebkit2gtk-4.1.so.0", c"libgtk-3.so.0"] {
+        // SAFETY: plain dlopen of a library name; the handle is kept (never closed).
+        if unsafe { dlopen(lib.as_ptr(), RTLD_LAZY | RTLD_GLOBAL) }.is_null() {
+            // SAFETY: dlerror returns a valid C string right after a failed dlopen.
+            let why = unsafe { CStr::from_ptr(dlerror()) }.to_string_lossy();
+            return Err(format!(
+                "cannot open windows: {} is not available ({why}). Install WebKitGTK 4.1, e.g. `apt install libwebkit2gtk-4.1-0`.",
+                lib.to_string_lossy()
+            ));
+        }
+    }
+    Ok(())
 }
 
 type Emit = Arc<dyn Fn(HostEvent) + Send + Sync>;
