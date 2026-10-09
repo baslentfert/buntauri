@@ -71,8 +71,31 @@ buntauri/
       HTML/CSS/JS rewritten to `/`). One exe:
       `bun build --compile --windows-hide-console examples/bun/hello.ts examples/bun/assets/index.html`.
 - [x] Release build: Windows UI DLLs allowed + delay-loaded. `bun.exe` and a compiled app are ~97 MB.
+- [x] Examples: `examples/dashboard` (React 19 system dashboard), `examples/game` (PixiJS 8 game).
 - [ ] Submit the type fixes to Bun (PR), so they drop out of `sync.ts`.
-- [ ] Phase 2b: `@tauri-apps/api` compatibility (`invoke`).
-- [ ] Phase 3: `buntauri build`, window icon, tray (tray-icon), menus (muda), manifest,
-      code signing (Azure Artifact Signing, configurable per app).
-- [ ] Phase 4: macOS (host subprocess), Linux.
+
+## TODO: native features (what Tauri has and Bun does not)
+
+Bun already covers most Tauri plugins: fs (`node:fs`, `Bun.file`), http (`fetch`), shell/process
+(`Bun.spawn`, `Bun.$`), os (`node:os`), sql/store (`bun:sqlite`, `Bun.SQL`), websocket, crypto,
+opening URLs/files (`Bun.spawn(["cmd", "/c", "start", "", url])`; note `Bun.$` has no `start`),
+autostart (registry via `reg.exe`), clipboard *images* (`Bun.Image.fromClipboard`).
+What is left is the native shell around the window:
+
+- [ ] Window icon (tao)
+- [ ] Tray icon with menu and click events (`tray-icon` 0.26)
+- [ ] Menus: window menu bar and context menus (`muda` 0.21)
+- [ ] Window control at runtime: minimize, maximize, show/hide, size, position, focus,
+      always-on-top, fullscreen, plus resize/move/focus events (tao)
+- [ ] Native dialogs: open/save file, folder picker, message box (`rfd`)
+- [ ] Notifications (Windows toasts)
+- [ ] Global shortcuts (`global-hotkey`)
+- [ ] Clipboard text (`arboard`)
+- [ ] Single instance (named mutex, forward args to the running app)
+- [ ] Deep links / custom URL scheme (registry)
+- [ ] `@tauri-apps/api` compatibility layer (`invoke`, events)
+- [ ] CSP headers on `app://`
+- [ ] `buntauri build`: one command for compile + icon + manifest (DPI awareness) + signing
+- [ ] Code signing (Azure Artifact Signing, configurable per app)
+- [ ] Updater (maybe; single exe makes it simpler)
+- [ ] macOS (host subprocess), Linux
