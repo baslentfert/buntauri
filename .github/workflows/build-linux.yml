@@ -73,17 +73,15 @@ jobs:
         working-directory: bun
         # Run Bun's build like locally: its CI mode (on when CI/GITHUB_ACTIONS
         # are set) is for Bun's Buildkite: it buffers output for annotations
-        # and fetches a symbol order file.
-        env:
-          CI: "false"
-          GITHUB_ACTIONS: "false"
+        # and fetches a symbol order file. GitHub ignores `env:` overrides of
+        # GITHUB_* variables, so they are removed with `env -u` below.
         # Full output goes to a file: the link prints thousands of harmless
         # lld warnings that push the real errors out of the Actions log.
         run: |
           set -o pipefail
           # No LTO on Linux CI: a much lighter link on the 16 GB runner (mac-buntauri builds locally the same way).
           lto=$([ "${{ inputs.profile }}" = release ] && echo "--lto=off" || true)
-          bun scripts/build.ts --profile=${{ inputs.profile }} $lto 2>&1 | tee ../build.log | grep -v "Linking two modules of different target triples"
+          env -u CI -u GITHUB_ACTIONS bun scripts/build.ts --profile=${{ inputs.profile }} $lto 2>&1 | tee ../build.log | grep -v "Linking two modules of different target triples"
 
       - name: Build errors
         if: failure()
