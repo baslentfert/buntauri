@@ -3,7 +3,7 @@
 //   bun scripts/macos-app.ts --entry app.ts --asset assets/index.html \
 //     --name "My App" --id com.example.myapp --version 1.0.0 --icon icon.png \
 //     [--runtime path/to/buntauri-bun] [--sign "Developer ID Application: …"] \
-//     [--notarize <notarytool keychain profile>] [--out dist]
+//     [--notarize <notarytool keychain profile>] [--dmg] [--out dist]
 //
 // - The runtime is the buntauri build of Bun that `bun build --compile` copies
 //   into the app (default: the bun running this script). For distribution use
@@ -12,8 +12,11 @@
 //   "-" signs ad hoc. Hardened runtime with entitlements.plist next to this file.
 // - --notarize: a profile stored once with `xcrun notarytool store-credentials`;
 //   no Apple ID, password or key ever passes through this script.
+// - --dmg: also make Name-version.dmg (the app + a link to /Applications),
+//   signed, and notarized/stapled too with --notarize. The app inside is
+//   stapled first, so it also passes Gatekeeper offline once copied out.
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -29,6 +32,7 @@ const { values: opt } = parseArgs({
     runtime: { type: "string", default: process.execPath },
     sign: { type: "string" },
     notarize: { type: "string" },
+    dmg: { type: "boolean", default: false },
     out: { type: "string", default: "dist" },
     "min-macos": { type: "string" },
   },
@@ -118,7 +122,22 @@ if (opt.sign) {
   console.log(`✓ signed (${opt.sign})`);
 }
 
-// 5. Notarize and staple.
+// 5. Notarize and staple: submit, wait, and require "Accepted" (notarytool
+// exits 0 for a rejected submission too); on rejection show Apple's log.
+const notarize = (path: string, upload: string) => {
+  console.log(`… notarizing ${upload.split("/").pop()} (this waits for Apple)`);
+  const r = spawnSync("xcrun", ["notarytool", "submit", upload, "--keychain-profile", opt.notarize!, "--wait"], { encoding: "utf8" });
+  const out = `${r.stdout}${r.stderr}`;
+  const id = /id: ([0-9a-f-]{36})/.exec(out)?.[1];
+  if (r.status !== 0 || !/status: Accepted/.test(out)) {
+    console.error(out.trim());
+    if (id) console.error(run(["xcrun", "notarytool", "log", id, "--keychain-profile", opt.notarize!], "notarytool log"));
+    process.exit(1);
+  }
+  run(["xcrun", "stapler", "staple", path], "stapler");
+  console.log(`✓ notarized and stapled (${id})`);
+};
+
 if (opt.notarize) {
   if (!opt.sign || opt.sign === "-") {
     console.error("--notarize needs --sign with a Developer ID Application identity");
@@ -126,11 +145,33 @@ if (opt.notarize) {
   }
   const zip = join(resolve(opt.out), `${exeName}-notarize.zip`);
   run(["ditto", "-c", "-k", "--keepParent", app, zip], "ditto");
-  console.log("… notarizing (this waits for Apple)");
-  console.log(run(["xcrun", "notarytool", "submit", zip, "--keychain-profile", opt.notarize, "--wait"], "notarytool submit").trim());
-  run(["xcrun", "stapler", "staple", app], "stapler");
+  notarize(app, zip);
   rmSync(zip, { force: true });
-  console.log(run(["spctl", "--assess", "--type", "execute", "--verbose=2", app], "spctl").trim() || "✓ notarized and stapled");
+  const gk = spawnSync("spctl", ["--assess", "--type", "execute", "--verbose=2", app], { encoding: "utf8" });
+  console.log(`  Gatekeeper: ${(gk.stderr || gk.stdout).trim().split("\n").slice(1).join(", ")}`);
+}
+
+// 6. Disk image: the app and a link to /Applications to drag it onto.
+if (opt.dmg) {
+  const dmg = resolve(opt.out, `${exeName}-${opt.version}.dmg`);
+  const stage = mkdtempSync(join(tmpdir(), "buntauri-dmg-"));
+  // ditto-like copy that keeps the signature, the stapled ticket and symlinks.
+  cpSync(app, join(stage, `${opt.name}.app`), { recursive: true, verbatimSymlinks: true });
+  symlinkSync("/Applications", join(stage, "Applications"));
+  rmSync(dmg, { force: true });
+  run(["hdiutil", "create", "-volname", opt.name, "-srcfolder", stage, "-format", "UDZO", "-ov", dmg], "hdiutil create");
+  rmSync(stage, { recursive: true, force: true });
+  if (opt.sign) {
+    const flags = ["--force", "--sign", opt.sign];
+    if (opt.sign !== "-") flags.push("--timestamp");
+    run(["codesign", ...flags, dmg], "codesign (dmg)");
+  }
+  console.log(`✓ ${dmg}`);
+  if (opt.notarize) {
+    notarize(dmg, dmg);
+    const gk = spawnSync("spctl", ["--assess", "--type", "open", "--context", "context:primary-signature", "--verbose=2", dmg], { encoding: "utf8" });
+    console.log(`  Gatekeeper: ${(gk.stderr || gk.stdout).trim().split("\n").slice(1).join(", ")}`);
+  }
 }
 
 console.log(`done: ${app}`);
