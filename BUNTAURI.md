@@ -138,7 +138,11 @@ What is left is the native shell around the window:
 - [ ] `@tauri-apps/api` compatibility layer (`invoke`, events)
 - [ ] CSP headers on `app://`
 - [ ] `buntauri build`: one command for compile + icon + manifest (DPI awareness) + signing
-- [ ] Code signing (Azure Artifact Signing, configurable per app)
+- [x] macOS: signed + notarized .app with `scripts/macos-app.ts` (Info.plist, .icns, hardened runtime
+      with only `allow-jit`, notarytool + staple). Verified: Gatekeeper accepts it as "Notarized Developer
+      ID", and it runs with the quarantine flag set. Credentials stay in a local notarytool keychain profile.
+- [ ] Windows code signing (Azure Artifact Signing, configurable per app)
+- [ ] macOS notarization in CI (App Store Connect API key as a GitHub secret)
 - [ ] Updater (maybe; single exe makes it simpler)
 - [ ] macOS: Bun + buntauri **builds, links and starts** in CI (macOS 14, Apple Silicon, release;
       `bun:buntauri` loads). Windows cannot open yet: AppKit needs the process main thread, so the
