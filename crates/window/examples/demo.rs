@@ -211,6 +211,13 @@ fn main() {
                     ui.close(w);
                 }
             }
+            HostEvent::App { kind, data } => {
+                println!("[host] app {kind} {data}");
+                // macOS app menu Quit (Cmd+Q): this demo just quits.
+                if kind == "quitrequested" {
+                    break;
+                }
+            }
             HostEvent::Exited => break,
         }
     }

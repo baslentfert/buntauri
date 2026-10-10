@@ -134,6 +134,10 @@ pub enum HostEvent {
     Reply { req: u64, ok: bool, value: serde_json::Value },
     /// A registered global shortcut fired. `state`: `pressed` or `released`.
     Shortcut { accelerator: String, state: &'static str },
+    /// About the app as a whole. `kind`: `reopen` (macOS: Dock icon clicked;
+    /// `data.hasVisibleWindows`) or `quitrequested` (macOS app menu Quit /
+    /// Cmd+Q; the host decides whether to quit).
+    App { kind: &'static str, data: serde_json::Value },
     /// The UI thread's event loop has stopped.
     Exited,
 }
@@ -186,6 +190,7 @@ impl HostEvent {
                 y: v["y"].as_f64().unwrap_or_default(),
             },
             "trayfailed" => HostEvent::TrayFailed { tray: tray()?, message: text("message") },
+            "app" => HostEvent::App { kind: kind("kind", &["reopen", "quitrequested"]), data: v["data"].clone() },
             "reply" => HostEvent::Reply {
                 req: v["req"].as_u64().ok_or_else(|| format!("reply without req: {json}"))?,
                 ok: v["ok"].as_bool().unwrap_or_default(),
@@ -214,6 +219,7 @@ impl HostEvent {
             | HostEvent::TrayFailed { .. }
             | HostEvent::Reply { .. }
             | HostEvent::Shortcut { .. }
+            | HostEvent::App { .. }
             | HostEvent::Exited => None,
         }
     }
@@ -265,6 +271,7 @@ impl HostEvent {
             }
             HostEvent::TrayFailed { tray, message } => json!({ "type": "trayfailed", "tray": tray, "message": message }),
             HostEvent::Reply { req, ok, value } => json!({ "type": "reply", "req": req, "ok": ok, "value": value }),
+            HostEvent::App { kind, data } => json!({ "type": "app", "kind": kind, "data": data }),
             HostEvent::Shortcut { accelerator, state } => {
                 json!({ "type": "shortcut", "accelerator": accelerator, "state": state })
             }
@@ -677,6 +684,18 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
     // macOS: AppKit requires the process main thread; there this runs in the
     // UI host process (host.rs), on its main thread.
     let mut event_loop = builder.build();
+    // macOS: the menu bar while no window sets its own (app menu, Edit, Window).
+    // tao sets none, and without an Edit menu copy/paste shortcuts do nothing.
+    #[cfg(target_os = "macos")]
+    let app_menu = native::default_menu(&native::app_name())
+        .map_err(|message| emit(HostEvent::Error { window: None, message }))
+        .ok();
+    #[cfg(target_os = "macos")]
+    let restore_app_menu = || {
+        if let Some(m) = &app_menu {
+            m.init_for_nsapp();
+        }
+    };
     let proxy = event_loop.create_proxy();
     if ready.send(event_loop.create_proxy()).is_err() {
         return;
@@ -711,6 +730,12 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
                 let (window, tray) = match owner {
                     Owner::Window(w) => (Some(w), None),
                     Owner::Tray(t) => (None, Some(t)),
+                    Owner::App => {
+                        if id == "quit" {
+                            emit(HostEvent::App { kind: "quitrequested", data: serde_json::Value::Null });
+                        }
+                        return;
+                    }
                 };
                 emit(HostEvent::Menu { window, tray, id });
             }
@@ -754,7 +779,15 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
         };
+        // The app has finished launching: now the menu bar can be set.
+        #[cfg(target_os = "macos")]
+        if matches!(event, Event::NewEvents(tao::event::StartCause::Init)) {
+            restore_app_menu();
+        }
         match event {
+            Event::Reopen { has_visible_windows, .. } => {
+                emit(HostEvent::App { kind: "reopen", data: serde_json::json!({ "hasVisibleWindows": has_visible_windows }) });
+            }
             Event::UserEvent(cmd) => match cmd {
                 Command::Create(id, opts) => match create(target, &proxy, id, opts, &windows, &emit, &assets) {
                     Ok(entry) => {
@@ -787,6 +820,10 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
                 }
                 Command::Close(id) => {
                     if let Some(e) = windows.remove(&id) {
+                        #[cfg(target_os = "macos")]
+                        if e.menu.is_some() {
+                            restore_app_menu();
+                        }
                         by_native.remove(&e.window.id());
                         forget(id);
                         #[cfg(target_os = "windows")]
@@ -818,6 +855,10 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
                 Command::SetMenu(id, specs) => {
                     if let Some(e) = windows.get_mut(&id) {
                         let result = set_menu_bar(e, id, specs);
+                        #[cfg(target_os = "macos")]
+                        if e.menu.is_none() {
+                            restore_app_menu();
+                        }
                         #[cfg(target_os = "windows")]
                         match &e.menu {
                             Some(m) => {
@@ -942,6 +983,11 @@ fn ui_main(ready: mpsc::Sender<EventLoopProxy<Command>>, emit: Emit, assets: Arc
                     }
                 }
                 if let Some(id) = by_native.remove(&window_id) {
+                    #[cfg(target_os = "macos")]
+                    if windows.remove(&id).is_some_and(|e| e.menu.is_some()) {
+                        restore_app_menu();
+                    }
+                    #[cfg(not(target_os = "macos"))]
                     windows.remove(&id);
                     forget(id);
                     #[cfg(target_os = "windows")]
@@ -1212,6 +1258,9 @@ fn set_menu_bar(e: &mut Entry, id: WindowId, specs: Option<Vec<MenuItemSpec>>) -
         }
         let Some(specs) = specs else { return Ok(()) };
         let menu = native::build_menu(Owner::Window(id), &specs)?;
+        // macOS shows the first submenu as the app menu (titled with the app's
+        // name): put ours first, so the window's own menus keep their titles.
+        menu.prepend(&native::app_submenu(&native::app_name())?).map_err(|e| e.to_string())?;
         menu.init_for_nsapp();
         e.menu = Some(menu);
         Ok(())
@@ -1587,6 +1636,8 @@ mod tests {
             HostEvent::Menu { window: None, tray: Some(8), id: "quit".into() },
             HostEvent::Tray { tray: 9, kind: "doubleclick", button: "right", x: 1.5, y: 2.5 },
             HostEvent::TrayFailed { tray: 10, message: "t".into() },
+            HostEvent::App { kind: "reopen", data: serde_json::json!({ "hasVisibleWindows": false }) },
+            HostEvent::App { kind: "quitrequested", data: serde_json::Value::Null },
             HostEvent::Reply { req: 11, ok: true, value: serde_json::json!(["C:/a.txt", "C:/b.txt"]) },
             HostEvent::Reply { req: 12, ok: false, value: serde_json::json!("cancelled") },
             HostEvent::Shortcut { accelerator: "CmdOrCtrl+Shift+B".into(), state: "pressed" },

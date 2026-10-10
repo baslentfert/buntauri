@@ -76,6 +76,10 @@ function onNativeEvent(json: string) {
     shortcutHandlers.get(ev.accelerator)?.(ev.state);
     return;
   }
+  if (ev.type === "app") {
+    app._dispatch(ev);
+    return;
+  }
   const target = ev.tray != null ? trays.get(ev.tray) : ev.window != null ? windows.get(ev.window) : undefined;
   if (!target) {
     if (ev.type === "error" || ev.type === "warning") console.warn(`[buntauri] ${ev.message}`);
@@ -618,7 +622,41 @@ async function requestSingleInstance(appId: string) {
   return null;
 }
 
+// ── The app as a whole ──────────────────────────────────────────────────────
+
+/**
+ * App-wide events and quitting.
+ * - "reopen" ({ hasVisibleWindows }): macOS, the Dock icon was clicked. Without
+ *   a listener, the most recent window is shown when none is visible.
+ * - "before-quit" ({ preventDefault() }): Quit from the macOS app menu (Cmd+Q).
+ *   Without preventDefault() the app quits.
+ */
+class App extends Emitter {
+  /** Close every window and tray, then exit. */
+  quit(code = 0) {
+    for (const w of [...windows.values()]) w.close();
+    for (const t of [...trays.values()]) t.remove();
+    // The UI exits with us (its socket closes); nothing else should keep a desktop app alive.
+    process.exit(code);
+  }
+
+  /** @internal */
+  _dispatch(ev: any) {
+    if (ev.kind === "reopen") {
+      const data = { hasVisibleWindows: !!ev.data?.hasVisibleWindows };
+      if (!this._fire("reopen", data) && !data.hasVisibleWindows) [...windows.values()].at(-1)?.focus();
+    } else if (ev.kind === "quitrequested") {
+      let prevented = false;
+      this._fire("before-quit", { preventDefault: () => (prevented = true) });
+      if (!prevented) this.quit();
+    }
+  }
+}
+
+const app = new App();
+
 export default {
+  app,
   Window,
   Tray,
   setAssetsDir,

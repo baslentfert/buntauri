@@ -50,6 +50,8 @@ pub struct TraySpec {
 pub enum Owner {
     Window(u32),
     Tray(u32),
+    /// The app itself (macOS app menu: `app:quit`).
+    App,
 }
 
 impl Owner {
@@ -57,12 +59,16 @@ impl Owner {
         match self {
             Owner::Window(id) => format!("w{id}:"),
             Owner::Tray(id) => format!("t{id}:"),
+            Owner::App => "app:".into(),
         }
     }
 
     /// Split a namespaced muda id back into (owner, user id).
     pub fn parse(id: &str) -> Option<(Owner, String)> {
         let (head, rest) = id.split_once(':')?;
+        if head == "app" {
+            return Some((Owner::App, rest.to_string()));
+        }
         let n: u32 = head.get(1..)?.parse().ok()?;
         let owner = match head.as_bytes().first()? {
             b'w' => Owner::Window(n),
@@ -71,6 +77,83 @@ impl Owner {
         };
         Some((owner, rest.to_string()))
     }
+}
+
+/// macOS: the app's name, as the app menu shows it: CFBundleName of the
+/// .app, else the process name (e.g. `bun` when run as a script).
+#[cfg(target_os = "macos")]
+pub fn app_name() -> String {
+    use objc2_foundation::{ns_string, NSBundle, NSProcessInfo, NSString};
+    let bundle = NSBundle::mainBundle();
+    bundle
+        .objectForInfoDictionaryKey(ns_string!("CFBundleName"))
+        .and_then(|v| v.downcast::<NSString>().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| NSProcessInfo::processInfo().processName().to_string())
+}
+
+/// macOS: the app menu (the first one, titled with the app's name). Quit is
+/// our own item (`app:quit`), so the host gets "quitrequested" and can say no.
+#[cfg(target_os = "macos")]
+pub fn app_submenu(name: &str) -> Result<Submenu, String> {
+    let about = muda::AboutMetadata { name: Some(name.to_string()), ..Default::default() };
+    let quit = MenuItem::with_id(
+        MenuId::new(format!("{}quit", Owner::App.prefix())),
+        format!("Quit {name}"),
+        true,
+        Some("CmdOrCtrl+Q".parse::<Accelerator>().map_err(|e| e.to_string())?),
+    );
+    Submenu::with_items(
+        name,
+        true,
+        &[
+            &PredefinedMenuItem::about(None, Some(about)),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::services(None),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::hide(None),
+            &PredefinedMenuItem::hide_others(None),
+            &PredefinedMenuItem::show_all(None),
+            &PredefinedMenuItem::separator(),
+            &quit,
+        ],
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// macOS: the menu bar while no window has its own: the app menu, Edit (so
+/// copy/paste/undo work in the webview; macOS routes those shortcuts through
+/// the menu) and Window.
+#[cfg(target_os = "macos")]
+pub fn default_menu(name: &str) -> Result<Menu, String> {
+    let edit = Submenu::with_items(
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(None),
+            &PredefinedMenuItem::redo(None),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::cut(None),
+            &PredefinedMenuItem::copy(None),
+            &PredefinedMenuItem::paste(None),
+            &PredefinedMenuItem::select_all(None),
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    let window = Submenu::with_items(
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(None),
+            &PredefinedMenuItem::maximize(None),
+            &PredefinedMenuItem::fullscreen(None),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::close_window(None),
+            &PredefinedMenuItem::bring_all_to_front(None),
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Menu::with_items(&[&app_submenu(name)?, &edit, &window]).map_err(|e| e.to_string())
 }
 
 pub fn build_menu(owner: Owner, specs: &[MenuItemSpec]) -> Result<Menu, String> {
